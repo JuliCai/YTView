@@ -19,6 +19,16 @@ api_key = st.secrets["RAPIDAPI_KEY"]
 
 
 # ──────────────────────────── helpers ───────────────────────────
+def fetch_thumbnail(url: str) -> bytes | None:
+    """Download a thumbnail image and return its bytes."""
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        return resp.content
+    except Exception:
+        return None
+
+
 def extract_video_id(url: str) -> str | None:
     """Return the YouTube video ID from a variety of URL formats."""
     patterns = [
@@ -102,13 +112,14 @@ if url_input:
                 st.stop()
 
             title = dl_data.get("title", "")
-            thumb = dl_data.get("info", {}).get("image", "")
+            thumb_url = dl_data.get("info", {}).get("image", "")
+            thumb_bytes = fetch_thumbnail(thumb_url) if thumb_url else None
             progress_url = dl_data.get("progress_url", "")
 
         if title:
             st.subheader(title)
-        if thumb:
-            st.image(thumb, use_container_width=True)
+        if thumb_bytes:
+            st.image(thumb_bytes, use_container_width=True)
 
         if not progress_url:
             st.error("No progress URL returned by the API.")
@@ -124,7 +135,7 @@ if url_input:
         st.session_state[cache_key] = {
             "mp4_url": mp4_url,
             "title": title,
-            "thumb": thumb,
+            "thumb_bytes": thumb_bytes,
         }
         st.rerun()  # rerun so the cached path renders cleanly
     else:
