@@ -8,6 +8,7 @@ import streamlit as st
 # ──────────────────────────── config ────────────────────────────
 RAPIDAPI_HOST = "youtube-info-download-api.p.rapidapi.com"
 DOWNLOAD_ENDPOINT = f"https://{RAPIDAPI_HOST}/ajax/download.php"
+TRANSIENT_STATUS_CODES = {502, 503, 504, 520, 522, 524}
 
 # ──────────────────────────── page ──────────────────────────────
 st.set_page_config(page_title="YTView", layout="centered")
@@ -64,18 +65,61 @@ def request_download(youtube_url: str, api_key: str) -> dict:
 def poll_progress(progress_url: str, placeholder) -> str:
     """Poll the progress endpoint until the file is ready. Returns the MP4 URL."""
     bar = placeholder.progress(0, text="Processing video…")
+    started_at = time.monotonic()
+    transient_failures = 0
+    max_transient_failures = 20
+    max_total_wait_seconds = 15 * 60
+
     while True:
-        resp = requests.get(progress_url, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
+        if time.monotonic() - started_at > max_total_wait_seconds:
+            raise TimeoutError("Timed out while processing video. Please try again.")
+
+        try:
+            resp = requests.get(progress_url, timeout=20)
+
+            if resp.status_code in TRANSIENT_STATUS_CODES:
+                transient_failures += 1
+                if transient_failures > max_transient_failures:
+                    raise RuntimeError(
+                        "Progress server is temporarily unavailable (502/503). "
+                        "Please retry in a moment."
+                    )
+
+                wait_seconds = min(2 + transient_failures, 10)
+                bar.progress(
+                    0,
+                    text=f"Processing video… waiting for server ({transient_failures}/{max_transient_failures})",
+                )
+                time.sleep(wait_seconds)
+                continue
+
+            resp.raise_for_status()
+            data = resp.json()
+            transient_failures = 0
+
+        except (requests.ConnectionError, requests.Timeout):
+            transient_failures += 1
+            if transient_failures > max_transient_failures:
+                raise RuntimeError("Network error while polling progress. Please retry.")
+
+            wait_seconds = min(2 + transient_failures, 10)
+            bar.progress(
+                0,
+                text=f"Processing video… reconnecting ({transient_failures}/{max_transient_failures})",
+            )
+            time.sleep(wait_seconds)
+            continue
 
         progress = int(data.get("progress", 0))
         pct = min(progress / 10, 100)  # progress goes 0 → 1000
         bar.progress(int(pct), text=f"Processing video… {int(pct)}%")
 
         if progress >= 1000:
+            raw_url = data.get("download_url")
+            if not raw_url:
+                raise RuntimeError("Processing finished, but no download URL was returned.")
+
             bar.progress(100, text="Done!")
-            raw_url: str = data["download_url"]
             # The API sometimes returns doubled slashes in the path – clean them up
             # but keep the double slash after the scheme (https://)
             clean_url = re.sub(r"(?<!:)/{2,}", "/", raw_url)
