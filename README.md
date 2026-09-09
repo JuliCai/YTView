@@ -1,2 +1,89 @@
 # YTView
-Streamlit Youtube Video viewer based on rapidapi
+
+Instance-proxied YouTube playback on Streamlit Community Cloud. The RapidAPI
+conversion/polling service has been removed; no API key is required.
+
+## Playback path
+
+1. `yt-dlp` reads stream metadata **on the instance**. Deno and the bundled
+	 `yt-dlp-ejs` scripts handle current YouTube player challenges.
+2. YTView constructs an HLS master playlist with separate audio and H.264 video
+	 variants up to the selected quality cap (720p by default).
+3. Every playlist, segment, audio track, key, initialization segment and thumbnail
+	 is requested from **the same app origin**. Safari uses native HLS; other modern
+	browsers use hls.js, fetched, SHA-256 verified and served by the instance, not a
+	browser CDN request.
+4. The relay writes 64 KiB chunks with backpressure. Playback does not wait for a
+	 completed video download. There is **no transcoding, ffmpeg job, full-video
+	 in-memory buffer, or temporary video file**.
+5. Seeking requests the relevant HLS segments. When YouTube offers an already-muxed
+	 MP4 instead, the relay supports `Range`, `206`, `Content-Range`, and `HEAD`.
+	 Open-ended MP4 reads are capped at 2 MiB; explicit HLS ranges remain intact.
+
+Adaptive HLS can lower quality when throughput drops. The quality selector is a
+maximum, not a forced resolution. Try 360p on a bandwidth-constrained instance.
+
+## Privacy boundary
+
+- Signed upstream URLs/headers live only in server memory. The browser gets opaque,
+	random, six-hour playback tokens and local resource paths, not YouTube URLs.
+- Only HTTPS Googlevideo media hosts and the fixed thumbnail host are permitted;
+	every upstream redirect is checked and never forwarded to the client.
+- Remote error bodies, cookies, authorization headers, and video-title Markdown
+	are not forwarded. The player CSP restricts media, image, and network requests
+	to the app origin (plus local media blobs).
+- There is **no external player/link fallback**, including on extraction errors.
+- Playback tokens are bearer capabilities, not user authentication. Keep the app
+	private in Community Cloud if access needs restricting. Don't share player URLs.
+
+## Run / deploy
+
+Use Python 3.10 or newer, install requirements.txt into a virtual environment,
+then launch `streamlit run app.py`. The same command/entrypoint works locally on
+macOS and on Linux in Community Cloud. No extra exposed port is needed.
+
+Community Cloud should track **JuliCai/YTView → main → app.py**. Pushing to that
+branch triggers its update; dependency changes can require a rebuild/reboot. The
+footer **Build: instance-streaming-v1** identifies this deployment. Existing
+`RAPIDAPI_KEY` secrets can be removed; the application no longer reads them.
+
+**Keep Streamlit pinned to 1.54.0 and the Tornado backend enabled.** This version
+does not expose a public route-registration hook. The small adapter in
+streamlit_proxy.py finds the running Tornado application by its Streamlit websocket
+handler and Runtime identity, then calls Tornado's public `add_handlers` on the
+server event loop. It is tested but relies on private Streamlit internals. Changing
+Streamlit versions requires revalidating this adapter. Failure stops playback,
+never bypasses the proxy. Community Cloud's edge routing/buffering still needs a
+deployment test; a local test cannot prove those platform properties.
+
+## Current limitations
+
+- Finished public videos only; live/DVR, restricted/login-only videos and streams
+	without compatible HLS audio/video or muxed MP4 fail explicitly.
+- YouTube may deny the cloud's IP or change extraction behavior. Server-only routing
+	cannot cure an IP block. Update the paired yt-dlp/EJS dependencies when needed;
+	the app does not silently return to the old conversion service.
+- Source URLs can expire before a playback token does. **Refresh stream** resolves
+	new URLs and restarts playback. It also recovers after a server restart.
+- Streamlit Cloud CPU/bandwidth still limits throughput; this change removes the
+	conversion bottleneck, not the platform limits. At most 20 simultaneous relays,
+	32 playback tickets, and 30,000 resource references per ticket are admitted.
+- HLS buffers are bounded; media segments are not persistently cached. A seek back
+	outside the browser buffer fetches the required segments again.
+
+## Verification
+
+Install requirements-dev.txt and run `python -m pytest -q`. The tests are offline:
+mock upstreams verify incremental delivery, byte ranges, seeking, `HEAD`, unsafe
+redirect rejection, playlist rewriting, expiration, and same-port route precedence.
+They do not require a working local YouTube connection.
+
+Cloud acceptance checklist:
+
+1. Confirm the build footer, load a normal video at 720p, and check its thumbnail.
+2. Note the metadata resolution time and time from pressing Play to moving video.
+3. Confirm sound, seek well ahead into unbuffered video, then seek backwards.
+4. Watch for a minute and note the displayed rebuffer count; compare 360p if needed.
+5. In browser DevTools, confirm media/playlist/image requests use the app origin;
+	 there should be no YouTube, Googlevideo or Ytimg requests from the browser.
+6. Report the exact player/setup error if it fails. Do not share signed URLs or tokens.

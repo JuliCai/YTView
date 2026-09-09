@@ -1,2 +1,6 @@
-streamlit
-requests
+# The same-port adapter is tested against this Streamlit/Tornado API.
+streamlit==1.54.0
+tornado>=6.5.2,<7
+httpx==0.28.1
+yt-dlp[default]==2026.8.19
+deno==2.9.6

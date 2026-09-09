@@ -1,0 +1,7 @@
+[browser]
+gatherUsageStats = false
+
+[server]
+useStarlette = false
+enableCORS = true
+enableXsrfProtection = true

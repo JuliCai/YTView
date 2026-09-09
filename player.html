@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YTView player</title>
+  <style>
+    :root { color-scheme: dark; font: 14px system-ui, sans-serif; }
+    body { margin: 0; background: #10141d; color: #d3dceb; border-radius: 12px; overflow: hidden; }
+    video { width: 100%; height: min(56.25vw, 390px); display: block; background: #000; }
+    #status { padding: 12px 16px; line-height: 1.5; min-height: 42px; }
+    #details { color: #92a5be; font-size: 12px; }
+    .error { color: #ffb4b4; }
+  </style>
+</head>
+<body>
+  <video id="video" controls playsinline preload="metadata" poster="{{POSTER}}"></video>
+  <div id="status" role="status" aria-live="polite">
+    <div id="message">Opening the instance stream…</div>
+    <div id="details">All media stays on this app's origin.</div>
+  </div>
+  <script nonce="{{NONCE}}">
+    const video = document.getElementById('video');
+    const message = document.getElementById('message');
+    const details = document.getElementById('details');
+    const started = performance.now();
+    let hls, failed = false, stalls = 0, firstFrame = null, hasPlayed = false;
+    const say = text => { if (!failed) message.textContent = text; };
+    async function fail(text) {
+      if (failed) return;
+      failed = true;
+      if (hls) hls.stopLoad();
+      message.className = 'error';
+      message.textContent = text;
+      try {
+        const response = await fetch('{{STATUS}}');
+        if (response.ok) {
+          const data = await response.json();
+          if (data.error) message.textContent = data.error;
+          details.textContent = `Instance: ${data.requests} upstream requests, ${(data.bytes / 1048576).toFixed(2)} MiB relayed. Use “Refresh stream” above.`;
+        }
+      } catch (_) { details.textContent = 'The instance could not be reached. Refresh the stream above.'; }
+    }
+    video.addEventListener('loadedmetadata', () => say('Ready — press play. Seeking is available.'));
+    video.addEventListener('playing', () => {
+      hasPlayed = true;
+      if (firstFrame === null) firstFrame = ((performance.now() - started) / 1000).toFixed(1);
+      say('Playing through the instance');
+    });
+    video.addEventListener('waiting', () => { if (hasPlayed && !video.seeking) stalls++; say('Buffering from the instance…'); });
+    video.addEventListener('seeking', () => say('Seeking — requesting only the needed media…'));
+    video.addEventListener('seeked', () => say(video.paused ? 'Paused' : 'Playing through the instance'));
+    video.addEventListener('pause', () => say('Paused'));
+    video.addEventListener('ended', () => say('Finished'));
+    video.addEventListener('error', () => fail(`Playback failed (media code ${video.error?.code || 'unknown'}).`));
+    const timer = setInterval(() => {
+      if (failed) return;
+      let ahead = 0;
+      for (let i = 0; i < video.buffered.length; i++) {
+        if (video.buffered.start(i) <= video.currentTime && video.buffered.end(i) >= video.currentTime)
+          ahead = video.buffered.end(i) - video.currentTime;
+      }
+      details.textContent = `Buffered: ${ahead.toFixed(1)}s · Rebuffers: ${stalls} · Player ready/first play: ${firstFrame ?? '—'}s · Instance-only media`;
+    }, 1000);
+    if ('{{MODE}}' === 'mp4' || video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = '{{SOURCE}}';
+    } else {
+      const script = document.createElement('script');
+      script.src = '{{LIBRARY}}';
+      script.onerror = () => fail('The instance could not load the HLS player library.');
+      script.onload = () => {
+        if (!window.Hls || !Hls.isSupported()) return fail('This browser does not support HLS playback. Try Safari or a current Chromium browser.');
+        hls = new Hls({
+          maxBufferLength: 30, maxMaxBufferLength: 60, backBufferLength: 30,
+          maxBufferSize: 30 * 1024 * 1024, startLevel: 0, enableWorker: true,
+        });
+        hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) fail(`Streaming failed: ${data.details}.`); });
+        hls.loadSource('{{SOURCE}}');
+        hls.attachMedia(video);
+      };
+      document.head.appendChild(script);
+    }
+    window.addEventListener('pagehide', () => { clearInterval(timer); if (hls) hls.destroy(); video.removeAttribute('src'); video.load(); });
+  </script>
+</body>
+</html>
