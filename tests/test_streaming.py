@@ -282,6 +282,20 @@ class RelayHTTPTest(AsyncHTTPTestCase):
         assert response.code == 502 and b"secret" not in response.body
         assert "Set-Cookie" not in response.headers
 
+    def test_failed_media_request_is_captured_privately_for_comparison(self):
+        with patch.object(self.relay, "client", self.fake(403)):
+            assert self.fetch(self.path, headers={"Range": "bytes=100-200"}).code == 502
+        target = self.ticket.probe_target
+        assert target is not None and target.http_status == 403
+        assert target.resource.url == "https://r.googlevideo.com/media"
+        assert target.headers["Range"] == "bytes=100-200"
+        assert "googlevideo" not in str(self.ticket.snapshot())
+        assert "googlevideo" not in repr(target)
+        other_path = self.ticket.add(Resource("https://r.googlevideo.com/other", {}), BASE)
+        with patch.object(self.relay, "client", self.fake()):
+            assert self.fetch(other_path).code == 200
+        assert self.ticket.probe_target is target
+
     def test_expired_cross_origin_and_invalid_resource(self):
         assert self.fetch(self.path, headers={"Sec-Fetch-Site": "cross-site"}).code == 403
         assert self.fetch(f"{BASE}/resource/{self.ticket.token}/" + "0" * 32).code == 404

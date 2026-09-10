@@ -44,7 +44,7 @@ macOS and on Linux in Community Cloud. No extra exposed port is needed.
 
 Community Cloud should track **JuliCai/YTView → main → app.py**. Pushing to that
 branch triggers its update; dependency changes can require a rebuild/reboot. The
-footer **Build: instance-streaming-v3** identifies this deployment. Existing
+footer **Build: instance-streaming-v4** identifies this deployment. Existing
 `RAPIDAPI_KEY` secrets can be removed; the application no longer reads them.
 
 **After code updates, use Manage app → Reboot app in Community Cloud.** Python
@@ -98,6 +98,34 @@ options sends YouTube requests from the user's browser.
 Diagnostics include the selected profile, initial/remaining source wait, request
 range presence, and whether HTTPX re-encoded the URL (a boolean, never its contents).
 An accessible playlist does not prove that its signed segments will be accepted.
+
+### Bounded cloud-side segment comparison (v4)
+
+After attempting playback, expand **Compare media request — yt-dlp vs relay** and
+click **Run bounded segment comparison**. It runs only on demand, on the instance,
+and retains its result across ordinary UI reruns. No local YouTube testing is needed.
+
+- Reuses a captured media request, preferring a denied request. It does not extract
+	fresh URLs, so both tests target the **same existing signed URL**.
+- Runs yt-dlp's real native **HTTP fragment downloader** in test mode using its
+	urllib transport, then the relay's HTTPX transport. This is not a fresh yt-dlp
+	extraction or an end-to-end test of its HLS parser, cookies, or token providers.
+- Both clients use direct IPv4 and a matching bounded range. Each sample consumes
+	at most **10,241 body bytes**, discarding them in memory. The capped range can
+	differ from the original playback request; successful samples do not prove playback.
+- Redirects are disabled for both diagnostic clients, and redirected responses are
+	marked inconclusive. The normal relay's validated-redirect behavior is unchanged.
+- An isolated worker has a **35-second hard timeout**, with one comparison admitted
+	at a time. No video file, full-video download, automatic retry or browser fallback.
+- Signed URLs travel to the worker via stdin, never command-line arguments. Only
+	allowlisted result fields reach the UI: statuses, byte counts, durations, outcome
+	labels and exception class names. No URLs, cookies or remote error bodies.
+
+Share the comparison JSON. Native success with HTTPX 403 points to a transport or
+request difference. Both returning 403 means the denial is not unique to HTTPX,
+but does **not** prove an IP block: an expired/invalid URL, shared URL construction
+problem, session binding or attestation requirement remains possible. Both succeeding
+means only that the bounded samples worked at that moment.
 
 ## Current limitations
 

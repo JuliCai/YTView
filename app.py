@@ -17,6 +17,7 @@ try:
     from player import render_player
     from streaming import BUILD, REGISTRY
     from streamlit_proxy import RestartRequired, ensure_proxy
+    from segment_probe import SAMPLE_BYTES, WORKER_TIMEOUT, run_segment_probe
 except ImportError as exc:
     logging.getLogger(__name__).error("App module initialization failed: %s", type(exc).__name__)
     st.error(
@@ -92,6 +93,30 @@ def show_diagnostics(token):
         except HTTPError:
             st.warning("Playback expired or the instance restarted. Click Refresh stream.")
 
+
+@st.fragment
+def show_segment_comparison(token):
+    with st.expander("Compare media request — yt-dlp vs relay", expanded=True):
+        st.caption(
+            f"Run after a playback attempt. Tests the captured media URL, not a fresh extraction. "
+            f"At most {SAMPLE_BYTES:,} body bytes per client; {WORKER_TIMEOUT}s hard timeout. "
+            "Runs only on this instance, with no video file or direct-browser request."
+        )
+        if st.button("Run bounded segment comparison", key="run_segment_comparison"):
+            try:
+                with st.spinner("Comparing native yt-dlp and HTTPX on the instance…"):
+                    result = run_segment_probe(REGISTRY.get(token))
+                st.session_state["segment_comparison"] = {"token": token, "result": result}
+            except HTTPError:
+                st.warning("Playback expired. Load the video again before comparing.")
+        saved = st.session_state.get("segment_comparison")
+        if saved and saved["token"] == token:
+            result = saved["result"]
+            st.info(result.get("interpretation") or result.get("message", "Comparison finished."))
+            st.json(result, expanded=True)
+            st.caption("Share this JSON; it contains no signed URLs, cookies, or playback tokens. Both samples use a capped range, which can differ from the original playback request.")
+
+
 current = st.session_state.get("playback")
 if current:
     try:
@@ -105,8 +130,9 @@ if current:
         components.html(render_player(ticket, "_ytview"), height=660, scrolling=True)
         st.caption(f"{current['mode'].upper()} · up to {current['actual_height']}p · Metadata resolved in {current['resolved_seconds']}s")
         show_diagnostics(current["token"])
+        show_segment_comparison(current["token"])
         with st.expander("Playback troubleshooting"):
             st.write("Try 360p if the instance cannot sustain 720p. Forward/backward seeks fetch only the needed segments or byte ranges. Refresh stream renews expired source URLs.")
             st.write("For a bug report: include whether the thumbnail appears, time until playback, audio, forward/backward seeking, rebuffer count, and any error shown inside the player.")
 
-st.caption(f"Build: {BUILD} · startup guard v2.1 · cloud-relative routes + visible diagnostics · no RapidAPI")
+st.caption(f"Build: {BUILD} · bounded native segment comparison · startup guard v2.1 · no RapidAPI")

@@ -17,7 +17,7 @@ from tornado.web import HTTPError, RequestHandler
 from sources import MAX_SOURCE_WAIT, SourceError, Video, validate_upstream
 
 CHUNK_SIZE = 64 * 1024
-BUILD = "instance-streaming-v3"
+BUILD = "instance-streaming-v4"
 MAX_MANIFEST = 2 * 1024 * 1024
 MAX_RANGE = 2 * 1024 * 1024
 TICKET_TTL = 6 * 60 * 60
@@ -32,6 +32,13 @@ class Resource:
     kind: str = "media"
 
 
+@dataclass(frozen=True)
+class ProbeTarget:
+    resource: Resource = field(repr=False)
+    headers: dict[str, str] = field(repr=False)
+    http_status: int | None = None
+
+
 @dataclass
 class Ticket:
     video: Video
@@ -42,6 +49,7 @@ class Ticket:
     requests: int = 0
     bytes_sent: int = 0
     events: deque = field(default_factory=lambda: deque(maxlen=40), repr=False)
+    probe_target: ProbeTarget | None = field(default=None, repr=False)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
     def record(self, stage: str, **details):
@@ -58,6 +66,7 @@ class Ticket:
                     "client_profile": self.video.client_profile,
                     "source_wait_seconds": round(max(0, self.video.available_at - time.time()), 1),
                     "network_policy": "direct IPv4 for extraction and relay",
+                    "segment_comparison_available": self.probe_target is not None,
                     "registered_resources": len(self.resources), "events": list(self.events)}
 
     def add(self, resource: Resource, prefix: str) -> str:
@@ -294,7 +303,17 @@ class ResourceHandler(BaseHandler):
             ticket.record("upstream request", kind=source.kind, method=self.request.method,
                           range_requested="Range" in headers,
                           url_reencoded=str(httpx.URL(source.url)) != source.url)
+            if source.kind == "media" and self.request.method == "GET":
+                with ticket.lock:
+                    if ticket.probe_target is None:
+                        ticket.probe_target = ProbeTarget(source, dict(headers))
             response = await self.relay.open(source, headers, self.request.method)
+            if source.kind == "media" and self.request.method == "GET":
+                with ticket.lock:
+                    target = ticket.probe_target
+                    if target and (target.resource == source or
+                                   (response.status_code == 403 and target.http_status != 403)):
+                        ticket.probe_target = ProbeTarget(source, dict(headers), response.status_code)
             ticket.record("upstream response", kind=source.kind, http=response.status_code)
             with ticket.lock:
                 ticket.requests += 1

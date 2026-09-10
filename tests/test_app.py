@@ -85,3 +85,22 @@ def test_selected_client_profile_is_preserved_on_refresh():
         assert not app.exception and resolve.call_count == 2
         resolve.assert_called_with("jNQXAC9IVRw", 720, client_profile="web_safari")
         REGISTRY.discard(app.session_state["playback"]["token"])
+
+
+def test_segment_probe_runs_only_on_click_and_result_survives_rerun():
+    video = Video("jNQXAC9IVRw", "Example", 60, "hls", (Track("https://r.googlevideo.com/video"),))
+    report = {"state": "complete", "interpretation": "Both clients were denied", "sample_limit_bytes_per_client": 10241}
+    with patch("streamlit_proxy.ensure_proxy", return_value="/_ytview"), \
+            patch("sources.resolve_video", return_value=video) as resolve, \
+            patch("segment_probe.run_segment_probe", return_value=report) as probe:
+        app = AppTest.from_file("app.py").run()
+        app.text_input[0].set_value("jNQXAC9IVRw")
+        app.button[0].click().run()
+        probe.assert_not_called()
+        next(button for button in app.button if button.key == "run_segment_comparison").click().run()
+        assert not app.exception and probe.call_count == 1
+        assert any("Both clients were denied" in message.value for message in app.info)
+        app.run()
+        assert not app.exception and probe.call_count == resolve.call_count == 1
+        assert app.session_state["segment_comparison"]["result"] == report
+        REGISTRY.discard(app.session_state["playback"]["token"])
