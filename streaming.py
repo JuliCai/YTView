@@ -17,7 +17,7 @@ from tornado.web import HTTPError, RequestHandler
 from sources import MAX_SOURCE_WAIT, SourceError, Video, validate_upstream
 
 CHUNK_SIZE = 64 * 1024
-BUILD = "instance-streaming-v6.1"
+BUILD = "instance-streaming-v6.2"
 MAX_MANIFEST = 2 * 1024 * 1024
 MAX_RANGE = 2 * 1024 * 1024
 TICKET_TTL = 6 * 60 * 60

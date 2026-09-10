@@ -44,7 +44,7 @@ macOS and on Linux in Community Cloud. No extra exposed port is needed.
 
 Community Cloud should track **JuliCai/YTView → main → app.py**. Pushing to that
 branch triggers its update; dependency changes can require a rebuild/reboot. The
-footer **Build: instance-streaming-v6.1** identifies this deployment. Existing
+footer **Build: instance-streaming-v6.2** identifies this deployment. Existing
 `RAPIDAPI_KEY` secrets can be removed; the application no longer reads them.
 
 **After code updates, use Manage app → Reboot app in Community Cloud.** In-process
@@ -140,28 +140,38 @@ or modify that source. See [BgUtils provider documentation](https://github.com/B
 This deployment changes Python and Linux dependencies: **reboot the Cloud app**
 and wait for its dependency update before trying the new profile.
 
-### Bounded cloud-side segment comparison
+### Bounded cloud-side segment comparison (v6.2)
 
 After attempting playback, expand **Compare media request — yt-dlp vs relay** and
 click **Run bounded segment comparison**. It runs only on demand, on the instance,
 and retains its result across ordinary UI reruns. No local YouTube testing is needed.
 
 - Reuses a captured media request, preferring a denied request. It does not extract
-	fresh URLs, so both tests target the **same existing signed URL**.
+	fresh URLs. The native and baseline HTTPX tests target the **same existing signed URL**.
 - Runs yt-dlp's real native **HTTP fragment downloader** in test mode using its
 	urllib transport, then the relay's HTTPX transport. This is not a fresh yt-dlp
 	extraction or an end-to-end test of its HLS parser, cookies, or token providers.
-- Both clients use direct IPv4 and a matching bounded range. Each sample consumes
+- The two baseline clients use direct IPv4 and a matching bounded range. Each sample consumes
 	at most **10,241 body bytes**, discarding them in memory. The capped range can
 	differ from the original playback request; successful samples do not prove playback.
 - Both diagnostic clients follow redirects manually, validating each destination
 	before connecting: HTTPS Googlevideo hosts only. At most **four requests per
-	client** (three redirects and a final response) are allowed. The original sample
+	sample** (three redirects and a final response) are allowed. The original sample
 	range is preserved, and intermediate bodies are closed without being read. An
 	unsafe/missing destination or redirect loop fails closed. Playback is unchanged.
 - Results include `http_chain`, for example `[302, 403]` or `[302, 206]`, and the
-	final `http_status`. Destination URLs and headers are never included. This replaces
+	final `http_status`. Destination URLs and raw headers are never included. This replaces
 	v4's inconclusive stop at the first redirect.
+- v6.2 adds two HTTPX controls: `relay_no_range` removes the Range header and reads
+	only the object's prefix; `relay_query_range` appends a bounded `range` URL parameter
+	without that header. The latter is only tried on canonical `/videoplayback` URLs
+	where range is neither already present nor listed in signed fields. Other URL
+	bytes are preserved exactly; unsupported HLS path layouts are skipped, not guessed.
+	Redirect destinations are followed as supplied and validated, never patched.
+- All **four samples** stop at **10,241 bytes each** (at most **40,964 sampled body
+	bytes** altogether), even without a Range header or Content-Length. Streams are
+	closed early; no media file or complete-video fallback is used. A sanitized numeric
+	`response_range` may be shown, but sample success does not validate arbitrary seeks.
 - An isolated worker has a **35-second hard timeout**, with one comparison admitted
 	at a time. No video file, full-video download, automatic retry or browser fallback.
 - Signed URLs travel to the worker via stdin, never command-line arguments. Only
@@ -173,6 +183,12 @@ request difference. Both returning 403 means the denial is not unique to HTTPX,
 but does **not** prove an IP block: an expired/invalid URL, shared URL construction
 problem, session binding or attestation requirement remains possible. Both succeeding
 means only that the bounded samples worked at that moment.
+
+If removing the header or using a query range succeeds while the header request
+fails, range encoding is a candidate for investigation. Playback behavior is not
+automatically changed. If all tested forms return 403, changing HTTP libraries or
+removing the header is insufficient; a fresh native extraction or a different-host
+control is more useful than another speculative relay change.
 
 ## Current limitations
 

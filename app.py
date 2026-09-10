@@ -17,7 +17,7 @@ try:
     from player import render_player
     from streaming import BUILD, REGISTRY
     from streamlit_proxy import RestartRequired, ensure_proxy
-    from segment_probe import SAMPLE_BYTES, WORKER_TIMEOUT, run_segment_probe
+    from segment_probe import SAMPLE_BYTES, SAMPLE_COUNT, WORKER_TIMEOUT, run_segment_probe
 except (ImportError, KeyError) as exc:
     # An interrupted import can raise KeyError if a watcher removes the module.
     # Do not disguise unrelated dictionary bugs as a deployment mismatch.
@@ -106,7 +106,8 @@ def show_segment_comparison(token):
     with st.expander("Compare media request — yt-dlp vs relay", expanded=True):
         st.caption(
             f"Run after a playback attempt. Tests the captured media URL, not a fresh extraction. "
-            f"At most {SAMPLE_BYTES:,} body bytes per client; {WORKER_TIMEOUT}s hard timeout. "
+            f"Up to {SAMPLE_COUNT} samples, {SAMPLE_BYTES:,} body bytes each; {WORKER_TIMEOUT}s hard timeout. "
+            "Compares a Range header, no Range header, and an unsigned URL range where safe. "
             "Follows only validated media redirects and shows the HTTP status chain. "
             "Runs only on this instance, with no video file or direct-browser request."
         )
@@ -122,7 +123,7 @@ def show_segment_comparison(token):
             result = saved["result"]
             st.info(result.get("interpretation") or result.get("message", "Comparison finished."))
             st.json(result, expanded=True)
-            st.caption("Share this JSON; it contains no signed URLs, cookies, or playback tokens. Both samples use a capped range, which can differ from the original playback request.")
+            st.caption("Share this JSON; it contains no signed URLs, cookies, or playback tokens. All reads stop at the sample cap, including the no-Range control. A successful prefix read does not prove seeking works.")
 
 
 current = st.session_state.get("playback")

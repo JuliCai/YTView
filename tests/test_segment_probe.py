@@ -296,11 +296,13 @@ def test_worker_receives_secrets_only_on_stdin_and_only_safe_fields_return():
               "http_chain": [302, 403],
               "url": URL, "error_body": "private data"}
     with patch("segment_probe.subprocess.run", return_value=SimpleNamespace(
-            returncode=0, stdout=json.dumps({"native_ytdlp": sample, "relay_httpx": sample}))) as run:
+            returncode=0, stdout=json.dumps({key: sample for key in probe._SAMPLE_KEYS}))) as run:
         result = probe.run_segment_probe(ticket())
     assert result["state"] == "complete"
-    assert "Both clients were denied" in result["interpretation"]
+    assert "All tested request forms were denied" in result["interpretation"]
     assert result["native_ytdlp"]["http_chain"] == [302, 403]
+    assert result["mode"] == "hls"
+    assert result["total_sample_limit_bytes"] == 4 * probe.SAMPLE_BYTES
     assert "signature" not in json.dumps(result) and "private" not in json.dumps(result)
     args, kwargs = run.call_args
     assert URL not in " ".join(args[0])
@@ -362,3 +364,109 @@ def test_differential_interpretation_does_not_assert_an_ip_block():
     denied = {"outcome": "http_error", "http_status": 403}
     assert "Investigate transport/header differences" in probe.interpretation(native, denied)
     assert "full playback is not yet proven" in probe.interpretation(native, native)
+
+
+def test_range_header_denial_can_be_distinguished_without_full_download():
+    class ChunkedBody(httpx.AsyncByteStream):
+        def __init__(self):
+            self.chunks_read = 0
+            self.closed = False
+
+        async def __aiter__(self):
+            for _ in range(100):
+                self.chunks_read += 1
+                yield b"x" * 1024
+
+        async def aclose(self):
+            self.closed = True
+
+    requests, bodies = [], []
+
+    def send(request):
+        requests.append(request)
+        body = ChunkedBody()
+        bodies.append(body)
+        if "Range" in request.headers:
+            return httpx.Response(403, stream=body)
+        response_headers = {"Content-Type": "video/mp4"}
+        code = 200
+        if "range" in request.url.params:
+            code = 206
+            response_headers["Content-Range"] = f"bytes 0-{probe.SAMPLE_BYTES - 1}/102400"
+        return httpx.Response(code, headers=response_headers, stream=body)
+
+    def relay():
+        return SimpleNamespace(client=httpx.AsyncClient(transport=httpx.MockTransport(send), trust_env=False))
+
+    url = "https://r.googlevideo.com/videoplayback?sig=private%2Fvalue&pot=private+token"
+    with patch("segment_probe.Relay", side_effect=relay):
+        results = asyncio.run(probe._httpx_range_samples(url, HEADERS))
+    assert results["relay_httpx"]["http_status"] == 403
+    assert results["relay_no_range"]["http_status"] == 200
+    assert results["relay_query_range"]["http_status"] == 206
+    assert all(result["bytes_read"] == probe.SAMPLE_BYTES for key, result in results.items() if key != "relay_httpx")
+    assert str(requests[0].url) == str(requests[1].url) == url
+    assert str(requests[2].url) == url + f"&range=0-{probe.SAMPLE_BYTES - 1}"
+    assert ["Range" in request.headers for request in requests] == [True, False, False]
+    assert all(body.closed for body in bodies)
+    assert bodies[0].chunks_read == 0
+    assert all(body.chunks_read <= 11 for body in bodies[1:])
+    assert "private" not in json.dumps(results)
+
+
+@pytest.mark.parametrize("suffix, reason", [
+    ("/segment?sig=secret", "unsupported_url_layout"),
+    ("/videoplayback/id/private/range/0-100", "unsupported_url_layout"),
+    ("/videoplayback?range=10-20&sig=secret", "existing_or_signed_range"),
+    ("/videoplayback?%72ange=&sig=secret", "existing_or_signed_range"),
+    ("/videoplayback?sparams=expire%2Cip%2Crange&sig=secret", "existing_or_signed_range"),
+    ("/videoplayback?lsparams=range&sig=secret", "existing_or_signed_range"),
+])
+def test_url_range_does_not_modify_existing_or_signed_fields(suffix, reason):
+    assert probe._query_range_url("https://r.googlevideo.com" + suffix, HEADERS) == (None, reason)
+
+
+def test_url_range_preserves_every_existing_query_byte_and_sample_offset():
+    url = "https://r.googlevideo.com/videoplayback?sig=a%2fb&pot=a+b%2Bc&n=one&n=two&sparams=ip%2Cid"
+    new_url, reason = probe._query_range_url(url, {"Range": "bytes=50-90"})
+    assert reason is None and new_url == url + "&range=50-90"
+
+
+def test_unsafe_url_range_is_rejected():
+    with pytest.raises(SourceError):
+        probe._query_range_url("http://127.0.0.1/videoplayback", HEADERS)
+
+
+def test_unsupported_url_range_skips_without_a_third_httpx_request():
+    result = {"outcome": "http_error", "http_status": 403, "http_chain": [403],
+              "bytes_read": 0, "seconds": 0.1}
+    with patch("segment_probe._httpx_sample", return_value=result) as sample:
+        samples = asyncio.run(probe._httpx_range_samples(URL, HEADERS))
+    assert sample.call_count == 2
+    assert samples["relay_query_range"]["outcome"] == "skipped"
+    assert probe._clean_result(samples["relay_query_range"])["reason"] == "unsupported_url_layout"
+
+
+@pytest.mark.parametrize("value", ["https://secret.invalid", "bytes 0-5/10\nsecret", "bytes " + "1" * 101 + "-2/3"])
+def test_response_range_metadata_cannot_leak_raw_headers(value):
+    raw = {"outcome": "ok", "http_status": 206, "http_chain": [206], "bytes_read": 1,
+           "seconds": 0.1, "response_range": value}
+    with pytest.raises(ValueError):
+        probe._clean_result(raw)
+
+
+def test_unknown_skip_reason_cannot_reach_ui():
+    raw = {"outcome": "skipped", "reason": URL, "http_status": None, "http_chain": [], "bytes_read": 0, "seconds": 0}
+    with pytest.raises(ValueError):
+        probe._clean_result(raw)
+
+
+def test_range_results_do_not_claim_seek_success_or_an_ip_block():
+    denied = {"outcome": "http_error", "http_status": 403}
+    success = {"outcome": "ok", "http_status": 206}
+    variants = {"relay_no_range": success, "relay_query_range": denied}
+    assert "does not yet provide a seekable" in probe.interpretation(denied, denied, variants)
+    variants["relay_query_range"] = success
+    assert "still need validation" in probe.interpretation(denied, denied, variants)
+    variants = {"relay_no_range": denied, "relay_query_range": denied}
+    assert "does not prove an IP block" in probe.interpretation(denied, denied, variants)

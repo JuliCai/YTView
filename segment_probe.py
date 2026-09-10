@@ -16,7 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 from yt_dlp import YoutubeDL
 from yt_dlp.downloader.http import HttpFD
@@ -30,12 +30,15 @@ SAMPLE_BYTES = 10_241  # yt-dlp FileDownloader._TEST_FILE_SIZE
 WORKER_TIMEOUT = 35
 SOCKET_TIMEOUT = 8
 MAX_REQUESTS = 4  # Same total request budget as the playback relay.
+SAMPLE_COUNT = 4  # Native header range; HTTPX header, no-header, URL range.
+_SAMPLE_KEYS = ("native_ytdlp", "relay_httpx", "relay_no_range", "relay_query_range")
+_SKIP_REASONS = {"unsupported_url_layout", "existing_or_signed_range"}
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _gate = threading.BoundedSemaphore(1)
 _MEDIA_TYPES = {"video/mp4", "audio/mp4", "video/mp2t", "audio/aac", "audio/mpeg",
                 "application/octet-stream", "binary/octet-stream"}
 _OUTCOMES = {"ok", "http_error", "redirect_blocked", "redirect_limit", "invalid_redirect",
-             "unsupported_response", "error", "empty"}
+             "unsupported_response", "error", "empty", "skipped"}
 
 
 def sample_range(headers: dict) -> str:
@@ -55,6 +58,25 @@ def sample_range(headers: dict) -> str:
 def _supported(headers) -> bool:
     return (headers.get("Content-Type", "").split(";")[0].lower() in _MEDIA_TYPES
             and headers.get("Content-Encoding", "identity").lower() == "identity")
+
+
+def _query_range_url(url: str, headers: dict) -> tuple[str | None, str | None]:
+    """Append an unsigned range only on canonical /videoplayback query URLs.
+
+    Do not rebuild/normalize existing signed query fields, overwrite a range,
+    or guess at HLS path-parameter semantics. No redirect destination is altered.
+    """
+    validate_upstream(url)
+    parsed = urlsplit(url)
+    if parsed.path != "/videoplayback":
+        return None, "unsupported_url_layout"
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    signed_fields = {field.strip().lower() for key in ("sparams", "lsparams")
+                     for value in query.get(key, []) for field in value.split(",")}
+    if "range" in query or "range" in signed_fields:
+        return None, "existing_or_signed_range"
+    bounded = sample_range(headers).removeprefix("bytes=")
+    return url + ("&" if "?" in url else "?") + "range=" + bounded, None
 
 
 def _redirect_target(url: str, location: str | None, result: dict) -> str:
@@ -197,6 +219,10 @@ async def _httpx_sample(url: str, headers: dict) -> dict:
                                            follow_redirects=False, timeout=SOCKET_TIMEOUT) as response:
                 result["http_status"] = response.status_code
                 result["http_chain"].append(response.status_code)
+                result.pop("response_range", None)
+                returned_range = response.headers.get("Content-Range", "")
+                if len(returned_range) <= 100 and re.fullmatch(r"bytes \d+-\d+/\d+", returned_range):
+                    result["response_range"] = returned_range
                 if response.status_code in _REDIRECT_STATUSES:
                     url = _redirect_target(url, response.headers.get("Location"), result)
                     continue  # The context closes this hop without reading its body.
@@ -219,6 +245,20 @@ async def _httpx_sample(url: str, headers: dict) -> dict:
     return result
 
 
+async def _httpx_range_samples(url: str, headers: dict) -> dict:
+    header_sample = await _httpx_sample(url, headers)
+    no_range_headers = {key: value for key, value in headers.items() if key.lower() != "range"}
+    no_range_sample = await _httpx_sample(url, no_range_headers)
+    query_url, reason = _query_range_url(url, headers)
+    if query_url is None:
+        query_sample = {"outcome": "skipped", "reason": reason, "http_status": None,
+                        "http_chain": [], "bytes_read": 0, "seconds": 0}
+    else:
+        query_sample = await _httpx_sample(query_url, no_range_headers)
+    return {"relay_httpx": header_sample, "relay_no_range": no_range_sample,
+            "relay_query_range": query_sample}
+
+
 def _clean_result(raw: dict) -> dict:
     """Allow only fixed labels/numbers across the worker-to-UI boundary."""
     result = {"outcome": raw["outcome"], "http_status": raw.get("http_status"),
@@ -238,10 +278,29 @@ def _clean_result(raw: dict) -> dict:
     exception = raw.get("exception", "")
     if exception and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", exception):
         result["exception"] = exception
+    if result["outcome"] == "skipped":
+        if raw.get("reason") not in _SKIP_REASONS or chain or result["bytes_read"]:
+            raise ValueError("Invalid skipped sample")
+        result["reason"] = raw["reason"]
+    returned_range = raw.get("response_range")
+    if returned_range is not None:
+        if (not isinstance(returned_range, str) or len(returned_range) > 100
+                or not re.fullmatch(r"bytes \d+-\d+/\d+", returned_range)):
+            raise ValueError("Invalid response range")
+        result["response_range"] = returned_range
     return result
 
 
-def interpretation(native: dict, relay: dict) -> str:
+def interpretation(native: dict, relay: dict, variants: dict | None = None) -> str:
+    if variants and relay["http_status"] == 403:
+        no_range, query = variants["relay_no_range"], variants["relay_query_range"]
+        if query["outcome"] == "ok":
+            return "The header-range sample was denied, but the URL-range sample read media. Range encoding is a candidate for a playback fix; response offsets and seeking still need validation."
+        if no_range["outcome"] == "ok":
+            return "The header-range sample was denied, but removing the Range header read media. This reads the object prefix, not an arbitrary seek offset; it does not yet provide a seekable playback solution."
+        if (native["http_status"] == no_range["http_status"] == 403
+                and (query["http_status"] == 403 or query["outcome"] == "skipped")):
+            return "All tested request forms were denied, including without a Range header. Changing HTTP libraries or removing that header is not enough. A fresh native extraction or a different-host control is needed; this alone still does not prove an IP block or a valid token."
     if {native["outcome"], relay["outcome"]} & {"redirect_blocked", "redirect_limit", "invalid_redirect"}:
         return "Inconclusive: a redirect was unsafe, missing a destination, or exceeded the request limit. No unvalidated destination was contacted; inspect the HTTP chains."
     if native["outcome"] == relay["outcome"] == "ok":
@@ -277,16 +336,18 @@ def run_segment_probe(ticket: Ticket) -> dict:
         if completed.returncode:
             return {"state": "error", "message": "The isolated diagnostic worker failed. No raw output was exposed."}
         raw = json.loads(completed.stdout)
-        native, relay = _clean_result(raw["native_ytdlp"]), _clean_result(raw["relay_httpx"])
-        return {"state": "complete", "build": BUILD, "client_profile": ticket.video.client_profile,
+        samples = {key: _clean_result(raw[key]) for key in _SAMPLE_KEYS}
+        return {"state": "complete", "build": BUILD, "mode": ticket.video.mode,
+            "client_profile": ticket.video.client_profile,
             "po_token_attached": ticket.video.po_token_attached,
-                "sample_limit_bytes_per_client": SAMPLE_BYTES, "sample_range": headers["Range"],
+            "sample_limit_bytes_per_sample": SAMPLE_BYTES, "sample_range": headers["Range"],
+            "sample_count_limit": SAMPLE_COUNT, "total_sample_limit_bytes": SAMPLE_COUNT * SAMPLE_BYTES,
                 "original_http_status": target.http_status,
                 "original_request_had_range": any(k.lower() == "range" for k in target.headers),
-                "max_requests_per_client": MAX_REQUESTS,
-                "scope": "Same existing URL; matched bounded range; direct IPv4; redirects validated before every hop (HTTPS Googlevideo only). Native yt-dlp HTTP fragment downloader (urllib), not fresh extraction or full HLS playback.",
-                "native_ytdlp": native, "relay_httpx": relay,
-                "interpretation": interpretation(native, relay)}
+            "max_requests_per_sample": MAX_REQUESTS,
+            "scope": "Existing source; direct IPv4; validated HTTPS Googlevideo redirects. Native and baseline HTTPX use the same bounded Range header. HTTPX controls omit that header, then append an unsigned range query where safe. The no-header control reads an object prefix; no fresh extraction or full playback test.",
+            **samples,
+            "interpretation": interpretation(samples["native_ytdlp"], samples["relay_httpx"], samples)}
     except subprocess.TimeoutExpired:
         return {"state": "timeout", "message": f"The comparison exceeded {WORKER_TIMEOUT} seconds. Its worker was terminated; no background probe remains."}
     except Exception as exc:
@@ -302,8 +363,8 @@ def _worker():
         headers = upstream_headers(Resource(url, payload["headers"]))
         headers["Range"] = sample_range(payload["headers"])
         native = _native_sample(url, headers)
-        relay = asyncio.run(_httpx_sample(url, headers))
-        print(json.dumps({"native_ytdlp": native, "relay_httpx": relay}, allow_nan=False))
+        variants = asyncio.run(_httpx_range_samples(url, headers))
+        print(json.dumps({"native_ytdlp": native, **variants}, allow_nan=False))
     except Exception:
         # Parent reports a fixed error; traceback/URLs must never reach UI logs.
         return 1
