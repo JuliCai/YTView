@@ -105,7 +105,7 @@ def test_selected_client_profile_is_preserved_on_refresh(profile):
         app.button[0].click().run()
         assert not app.exception
         resolve.assert_called_with("jNQXAC9IVRw", 720, client_profile=profile)
-        app.button[1].click().run()
+        next(button for button in app.button if button.key == "refresh_stream").click().run()
         assert not app.exception and resolve.call_count == 2
         resolve.assert_called_with("jNQXAC9IVRw", 720, client_profile=profile)
         REGISTRY.discard(app.session_state["playback"]["token"])
@@ -128,3 +128,37 @@ def test_segment_probe_runs_only_on_click_and_result_survives_rerun():
         assert not app.exception and probe.call_count == resolve.call_count == 1
         assert app.session_state["segment_comparison"]["result"] == report
         REGISTRY.discard(app.session_state["playback"]["token"])
+
+
+def test_fresh_native_test_needs_no_playback_and_never_calls_resolver():
+    report = {"state": "complete", "interpretation": "Fresh native sample read", "media_bytes": 10241}
+    with patch("streamlit_proxy.ensure_proxy", return_value="/_ytview"), \
+            patch("sources.resolve_video") as resolve, \
+            patch("native_probe.run_native_probe", return_value=report) as native, \
+            patch("segment_probe.run_segment_probe") as captured:
+        app = AppTest.from_file("app.py").run()
+        native.assert_not_called()
+        app.text_input[0].set_value("https://youtu.be/jNQXAC9IVRw")
+        app.selectbox[1].select("mweb_pot")
+        next(button for button in app.button if button.key == "run_native_probe").click().run()
+        assert not app.exception
+        native.assert_called_once_with("jNQXAC9IVRw", 720, client_profile="mweb_pot")
+        resolve.assert_not_called()
+        captured.assert_not_called()
+        assert not app.get("iframe")
+        assert any("Fresh native sample read" in item.value for item in app.info)
+        assert app.session_state["native_test"]["profile"] == "mweb_pot"
+        app.run()
+        assert not app.exception and native.call_count == 1
+        assert app.session_state["native_test"]["result"]["media_bytes"] == 10241
+
+
+def test_invalid_native_input_does_not_run_any_download():
+    with patch("streamlit_proxy.ensure_proxy", return_value="/_ytview"), \
+            patch("sources.resolve_video") as resolve, patch("native_probe.run_native_probe") as native:
+        app = AppTest.from_file("app.py").run()
+        app.text_input[0].set_value("https://example.invalid/private")
+        next(button for button in app.button if button.key == "run_native_probe").click().run()
+        assert not app.exception and app.error
+        native.assert_not_called()
+        resolve.assert_not_called()

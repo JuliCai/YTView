@@ -44,7 +44,7 @@ macOS and on Linux in Community Cloud. No extra exposed port is needed.
 
 Community Cloud should track **JuliCai/YTView → main → app.py**. Pushing to that
 branch triggers its update; dependency changes can require a rebuild/reboot. The
-footer **Build: instance-streaming-v6.2** identifies this deployment. Existing
+footer **Build: instance-streaming-v7** identifies this deployment. Existing
 `RAPIDAPI_KEY` secrets can be removed; the application no longer reads them.
 
 **After code updates, use Manage app → Reboot app in Community Cloud.** In-process
@@ -189,6 +189,52 @@ fails, range encoding is a candidate for investigation. Playback behavior is not
 automatically changed. If all tested forms return 403, changing HTTP libraries or
 removing the header is insufficient; a fresh native extraction or a different-host
 control is more useful than another speculative relay change.
+
+### Fresh native session test (v7)
+
+The previous comparison already tried yt-dlp's HTTP downloader, but with an
+existing YTView URL. **Run fresh native test** is different: enter a video URL,
+choose the profile/quality and press this button **instead of Load video**. No
+playback attempt or captured request is required. Start with the same profile that
+failed playback, so the session/download path is the main change being tested.
+
+- An isolated worker receives only the video ID and fixed settings. It invokes
+	`YoutubeDL.extract_info(..., download=True)` once. The same yt-dlp instance owns
+	extraction, format selection, cookies, request headers, transport and native
+	HTTP/HLS downloading. It does not call YTView's resolver, rewrite playlists,
+	construct segment URLs, filter source headers or use the HTTPX playback relay.
+- Uses direct IPv4 and the selected existing client/token policy. Mobile-web setup
+	and token generation stay server-side. `po_token_attached` reports the actual
+	selected URL, including `false` if this native run did not attach one; unlike
+	playback, this control does not apply YTView's token-bearing format filter.
+- Selects **one** native HTTPS or HLS format, preferring muxed formats but allowing
+	a single video-only or audio-only track for the access test. No merging, ffmpeg,
+	transcoding, account-cookie import or browser fallback. Selection can differ
+	from playback and does not impose its H.264 compatibility filter.
+- Native test mode is enabled. Since its HLS mode limits fragments rather than
+	bytes, independent read guards cap sample bodies at **64 KiB total**. Metadata
+	read through yt-dlp is limited to 8 MiB per response / 32 MiB total. These are
+	application-read limits, not exact wire-byte limits or token-runtime budgets.
+- Native output/fragment files are temporary and small. The parent deletes their
+	directory on success, error **and timeout**. A **240-second total deadline**
+	includes any cold provider setup and native availability wait; timeout kills the
+	worker's process group. One fresh native test runs at a time, only on a click.
+- Native networking follows redirects itself and retains its session. The result
+	shows **final HTTP responses**, not the earlier diagnostic's per-hop chains.
+	This isolated, ID-only control trusts yt-dlp's extractor/networking rather than
+	applying the playback relay's per-hop destination allowlist. No upstream URL,
+	cookie, title, media data or raw provider/downloader log reaches the browser.
+- `stage: extraction` means the test never reached a selected download;
+	`stage: download` means native selection reached the downloader stage.
+	A `sample_ok` / `sample_limit` result with bytes proves only a sampled read. HLS
+	test mode may read just an initialization fragment, and one track/sample cannot
+	prove audiovisual playback or arbitrary seeking. A fresh native media 403 means
+	the YTView resolver/relay was not required to reproduce the denial; it still
+	does not prove an IP block or identify the authorization failure.
+
+Reboot the Cloud process, confirm **instance-streaming-v7**, run the new button,
+and share **Fresh native yt-dlp result**. Playback is unchanged; this experiment
+is not an automatic fallback or a claimed 403 fix. No new dependencies are added.
 
 ## Current limitations
 

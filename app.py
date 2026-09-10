@@ -18,6 +18,7 @@ try:
     from streaming import BUILD, REGISTRY
     from streamlit_proxy import RestartRequired, ensure_proxy
     from segment_probe import SAMPLE_BYTES, SAMPLE_COUNT, WORKER_TIMEOUT, run_segment_probe
+    from native_probe import SAMPLE_LIMIT as NATIVE_SAMPLE_LIMIT, WORKER_TIMEOUT as NATIVE_TIMEOUT, run_native_probe
 except (ImportError, KeyError) as exc:
     # An interrupted import can raise KeyError if a watcher removes the module.
     # Do not disguise unrelated dictionary bugs as a deployment mismatch.
@@ -55,10 +56,34 @@ with st.form("open_video"):
     st.caption("The PO-token option prepares its dependencies on first use (up to three minutes). "
                "Mobile-web playback may be limited to an already-muxed 360p MP4; no conversion is used.")
     submitted = st.form_submit_button("Load video", type="primary")
+    native_submitted = st.form_submit_button("Run fresh native test", key="run_native_probe")
+    st.caption(f"Independent test: fresh extraction and native download in one yt-dlp session. "
+               f"No playback attempt needed. At most {NATIVE_SAMPLE_LIMIT // 1024} KiB of sample data, "
+               f"{NATIVE_TIMEOUT}s total including any token setup/wait. Does not change playback.")
 
 current = st.session_state.get("playback")
-refresh = st.button("Refresh stream", disabled=current is None,
+refresh = st.button("Refresh stream", key="refresh_stream", disabled=current is None,
                     help="Resolve fresh server-side URLs if playback expires or stalls. Restarts playback.")
+
+if native_submitted:
+    native_id = extract_video_id(url)
+    if not native_id:
+        st.error("Enter a valid YouTube URL or 11-character video ID before running the native test.")
+    else:
+        with st.spinner("Running fresh native yt-dlp extraction and a bounded download on this instance…"):
+            result = run_native_probe(native_id, quality, client_profile=profile)
+        st.session_state["native_test"] = {"video_id": native_id, "profile": profile,
+                                           "result": {"build": BUILD, **result}}
+
+if saved_native := st.session_state.get("native_test"):
+    with st.expander("Fresh native yt-dlp result", expanded=True):
+        st.caption(f"Last native test: {saved_native['video_id']} · {CLIENT_PROFILES[saved_native['profile']]}")
+        result = saved_native["result"]
+        st.info(result.get("interpretation") or result.get("message", "Native test finished."))
+        st.json(result, expanded=True)
+        st.caption("Safe to share: no signed URLs, cookies or raw logs. Native temporary samples are deleted. "
+                   "Sample success does not prove playback/seeking; an HLS sample may be only an init fragment. "
+                   "This is separate from the old captured-URL comparison below.")
 
 if submitted or refresh:
     video_id = extract_video_id(url) if submitted else current["video_id"]
@@ -144,4 +169,4 @@ if current:
             st.write("Try 360p if the instance cannot sustain 720p. Forward/backward seeks fetch only the needed segments or byte ranges. Refresh stream renews expired source URLs.")
             st.write("For a bug report: include whether the thumbnail appears, time until playback, audio, forward/backward seeking, rebuffer count, and any error shown inside the player.")
 
-st.caption(f"Build: {BUILD} · instance-only PO-token option · startup guard v2.2 · no RapidAPI")
+st.caption(f"Build: {BUILD} · fresh native session test · startup guard v2.2 · no RapidAPI")
