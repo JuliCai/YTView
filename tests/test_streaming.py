@@ -119,6 +119,24 @@ class RelayHTTPTest(AsyncHTTPTestCase):
         assert response.code == 200 and response.body.startswith(b"#EXTM3U")
         assert b"googlevideo" not in response.body
 
+    def test_mount_rejects_reloaded_handlers_in_existing_server(self):
+        before = len(self.application.default_router.rules)
+        with patch("streamlit_proxy.ResourceHandler", object()):
+            with pytest.raises(RuntimeError, match="Reboot app"):
+                mount_routes(self.application, BASE)
+        assert len(self.application.default_router.rules) == before
+        assert self.application.settings["ytview.relay"] is self.relay
+
+    def test_mount_rejects_reloaded_registry(self):
+        with patch("streamlit_proxy.REGISTRY", Registry()):
+            with pytest.raises(RuntimeError, match="Reboot app"):
+                mount_routes(self.application, BASE)
+
+    def test_mount_rejects_pre_guard_server(self):
+        self.application.settings.pop("ytview.route_generation")
+        with pytest.raises(RuntimeError, match="Reboot app"):
+            mount_routes(self.application, BASE)
+
     def test_player_csp_and_no_remote_urls(self):
         response = self.fetch(f"{BASE}/player/{self.ticket.token}")
         assert response.code == 200

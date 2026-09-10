@@ -47,6 +47,15 @@ branch triggers its update; dependency changes can require a rebuild/reboot. The
 footer **Build: instance-streaming-v2** identifies this deployment. Existing
 `RAPIDAPI_KEY` secrets can be removed; the application no longer reads them.
 
+**After code updates, use Manage app → Reboot app in Community Cloud.** Python
+may retain older imported modules, while Tornado's installed handlers retain their
+registry and connection pool even when Streamlit reloads scripts. A browser refresh
+or clearing Streamlit's data cache is not a process restart. Startup guard v2.1
+shows a recovery notice for import mismatches and refuses to reuse stale routes.
+An error such as `cannot import name 'render_player'` despite the function being
+present in the pushed code calls for a full reboot after the update finishes. If
+it persists, check that Cloud deployed the current commit and share its startup logs.
+
 **Keep Streamlit pinned to 1.54.0 and the Tornado backend enabled.** This version
 does not expose a public route-registration hook. The small adapter in
 streamlit_proxy.py finds the running Tornado application by its Streamlit websocket

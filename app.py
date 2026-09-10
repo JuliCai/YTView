@@ -5,17 +5,36 @@ import streamlit as st
 import streamlit.components.v1 as components
 from tornado.web import HTTPError
 
-from sources import SourceError, extract_video_id, resolve_video
-from player import render_player
-from streaming import BUILD, REGISTRY
-from streamlit_proxy import ensure_proxy
-
 st.set_page_config(page_title="YTView", layout="centered")
 st.title("YTView")
 st.caption("YouTube → this instance → you. No conversion queue. No direct YouTube requests from your browser.")
 
+# Render recovery instructions even during a partially applied deployment or when
+# Python still has an older module cached. Reloading individual modules is unsafe:
+# Tornado's existing handlers can retain the old registry and connection pool.
+try:
+    from sources import SourceError, extract_video_id, resolve_video
+    from player import render_player
+    from streaming import BUILD, REGISTRY
+    from streamlit_proxy import RestartRequired, ensure_proxy
+except ImportError as exc:
+    logging.getLogger(__name__).error("App module initialization failed: %s", type(exc).__name__)
+    st.error(
+        f"App modules could not initialize ({type(exc).__name__}). "
+        "The deployment may contain older files or cached modules. After the update finishes, "
+        "open Streamlit Cloud → Manage app → Reboot app. "
+        "Refreshing this page or clearing Streamlit's data cache does not restart Python. "
+        "If this persists after rebooting, share the deployment logs."
+    )
+    st.caption("Startup guard: v2.1 · playback stopped safely")
+    st.stop()
+
 try:
     prefix = ensure_proxy()
+except RestartRequired as exc:
+    st.error(str(exc))
+    st.caption("Startup guard: v2.1 · playback stopped safely")
+    st.stop()
 except Exception as exc:
     logging.getLogger(__name__).error("Streaming route setup failed: %s", type(exc).__name__)
     st.error(f"The instance streaming routes could not start ({type(exc).__name__}; Streamlit {st.__version__}). Check the pinned dependencies and reboot the app. No direct-browser fallback is enabled.")
@@ -85,4 +104,4 @@ if current:
             st.write("Try 360p if the instance cannot sustain 720p. Forward/backward seeks fetch only the needed segments or byte ranges. Refresh stream renews expired source URLs.")
             st.write("For a bug report: include whether the thumbnail appears, time until playback, audio, forward/backward seeking, rebuffer count, and any error shown inside the player.")
 
-st.caption(f"Build: {BUILD} · cloud-relative routes + visible diagnostics · no RapidAPI")
+st.caption(f"Build: {BUILD} · startup guard v2.1 · cloud-relative routes + visible diagnostics · no RapidAPI")

@@ -1,3 +1,6 @@
+from pathlib import Path
+import sys
+from types import ModuleType
 from unittest.mock import patch
 
 from streamlit.testing.v1 import AppTest
@@ -43,4 +46,26 @@ def test_proxy_startup_failure_stops_before_input():
         app = AppTest.from_file("app.py").run()
         assert not app.exception
         assert app.error
+        assert not app.text_input
+
+
+def test_old_cached_player_shows_reboot_instructions_not_import_traceback():
+    old_player = ModuleType("player")
+    old_player.__file__ = str(Path("player.py").resolve())
+    with patch.dict(sys.modules, {"player": old_player}):
+        app = AppTest.from_file("app.py").run()
+        assert not app.exception
+        assert "Reboot app" in app.error[0].value
+        assert "ImportError" in app.error[0].value
+        assert not app.text_input
+        assert not app.get("iframe")
+
+
+def test_stale_routes_show_reboot_instructions():
+    from streamlit_proxy import RestartRequired
+
+    with patch("streamlit_proxy.ensure_proxy", side_effect=RestartRequired("Manage app → Reboot app")):
+        app = AppTest.from_file("app.py").run()
+        assert not app.exception
+        assert "Reboot app" in app.error[0].value
         assert not app.text_input

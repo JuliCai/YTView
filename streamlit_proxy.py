@@ -16,15 +16,27 @@ from streamlit.web.server.browser_websocket_handler import BrowserWebSocketHandl
 from tornado.web import Application
 
 from player import PlayerHandler
-from streaming import HlsScriptHandler, ManifestHandler, Relay, ResourceHandler, StatusHandler
+from streaming import BUILD, REGISTRY, HlsScriptHandler, ManifestHandler, Relay, ResourceHandler, StatusHandler
 
 _lock = threading.Lock()
 _prefix: str | None = None
 
 
+class RestartRequired(RuntimeError):
+    """Safe user-facing notice for an incompatible in-process code upgrade."""
+
+
 def mount_routes(application: Application, prefix: str) -> None:
     marker = "ytview.relay"
+    generation = (prefix, BUILD, REGISTRY, PlayerHandler, ManifestHandler,
+                  StatusHandler, ResourceHandler, HlsScriptHandler)
     if marker in application.settings:
+        if application.settings.get("ytview.route_generation") != generation:
+            raise RestartRequired(
+                "The app code changed, but the server still holds older streaming handlers. "
+                "Open Streamlit Cloud → Manage app → Reboot app. A browser refresh is not enough. "
+                "After rebooting, load the video again."
+            )
         return
     relay = Relay()
     args = {"relay": relay, "prefix": prefix}
@@ -38,6 +50,7 @@ def mount_routes(application: Application, prefix: str) -> None:
         (base + r"/hls.js", HlsScriptHandler, args),
     ])
     application.settings[marker] = relay
+    application.settings["ytview.route_generation"] = generation
 
 
 async def _install(runtime: Runtime, prefix: str):
