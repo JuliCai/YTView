@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import aclosing
 from unittest.mock import patch
+from urllib.parse import urljoin
 
 import httpx
 import pytest
@@ -8,7 +9,7 @@ from tornado.testing import AsyncHTTPTestCase, gen_test
 from tornado.web import Application, HTTPError, RequestHandler
 
 from sources import SourceError, Track, Video
-from streaming import (CHUNK_SIZE, MAX_RANGE, REGISTRY, Registry, Resource, Ticket,
+from streaming import (BUILD, CHUNK_SIZE, MAX_RANGE, REGISTRY, Registry, Resource, Ticket,
                        master_playlist, rewrite_manifest, upstream_headers)
 from streamlit_proxy import mount_routes
 
@@ -121,7 +122,8 @@ class RelayHTTPTest(AsyncHTTPTestCase):
     def test_player_csp_and_no_remote_urls(self):
         response = self.fetch(f"{BASE}/player/{self.ticket.token}")
         assert response.code == 200
-        assert "connect-src 'self'" in response.headers["Content-Security-Policy"]
+        assert b'http-equiv="Content-Security-Policy"' in response.body
+        assert b"connect-src 'self'" in response.body
         assert b"googlevideo" not in response.body and b"ytimg" not in response.body
         assert b"https://" not in response.body and b"{{" not in response.body
 
@@ -178,7 +180,32 @@ class RelayHTTPTest(AsyncHTTPTestCase):
         assert response.code == 200
         assert response.headers["Content-Type"] == "application/vnd.apple.mpegurl"
         assert b"googlevideo" not in response.body
-        assert BASE.encode() in response.body
+        assert b"../../resource/" in response.body
+
+    def test_cloud_prefix_survives_master_and_nested_playlist_urls(self):
+        public_origin = "https://app.test/~/+"
+        response = self.fetch(f"{BASE}/master/{self.ticket.token}")
+        master_url = public_origin + f"{BASE}/master/{self.ticket.token}"
+        variant_path = response.body.decode().splitlines()[-1]
+        variant_url = urljoin(master_url, variant_path)
+        assert variant_url.startswith(public_origin + BASE + "/resource/")
+        with patch.object(self.relay, "client", self.fake(body=b'#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:5,\nsegment.ts\n')):
+            variant = self.fetch(variant_url.removeprefix(public_origin))
+        segment_path = variant.body.decode().splitlines()[-1]
+        assert urljoin(variant_url, segment_path).startswith(public_origin + BASE + "/resource/")
+        assert b'URI="../../resource/' in variant.body
+        assert b"googlevideo" not in variant.body
+
+    def test_diagnostics_are_bounded_and_do_not_expose_urls_or_tokens(self):
+        for _ in range(60):
+            self.ticket.record("upstream response", kind="media", http=403)
+        response = self.fetch(f"{BASE}/status/{self.ticket.token}")
+        assert response.code == 200
+        data = __import__("json").loads(response.body)
+        assert data["build"] == BUILD and len(data["events"]) == 40
+        assert b"googlevideo" not in response.body
+        assert self.ticket.token.encode() not in response.body
+        assert b"Cookie" not in response.body
 
     @gen_test
     async def test_runtime_discovery_uses_identity(self):

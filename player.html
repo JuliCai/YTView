@@ -2,85 +2,156 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'nonce-{{NONCE}}'; style-src 'unsafe-inline'; img-src 'self'; media-src 'self' blob:; connect-src 'self'; worker-src blob:; base-uri 'none'; form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>YTView player</title>
   <style>
     :root { color-scheme: dark; font: 14px system-ui, sans-serif; }
     body { margin: 0; background: #10141d; color: #d3dceb; border-radius: 12px; overflow: hidden; }
-    video { width: 100%; height: min(56.25vw, 390px); display: block; background: #000; }
+    video { width: 100%; height: min(56.25vw, 350px); display: block; background: #000; }
     #status { padding: 12px 16px; line-height: 1.5; min-height: 42px; }
     #details { color: #92a5be; font-size: 12px; }
+    #debug { margin: 0; padding: 12px 16px; height: 160px; overflow: auto; white-space: pre-wrap; font: 12px/1.5 monospace; border-top: 1px solid #334155; }
     .error { color: #ffb4b4; }
   </style>
 </head>
 <body>
-  <video id="video" controls playsinline preload="metadata" poster="{{POSTER}}"></video>
+  <video id="video" controls playsinline preload="metadata"></video>
   <div id="status" role="status" aria-live="polite">
-    <div id="message">Opening the instance stream…</div>
+    <div id="message">Player HTML loaded — waiting for JavaScript…</div>
     <div id="details">All media stays on this app's origin.</div>
   </div>
+  <pre id="debug" aria-label="Player diagnostics">If this line never changes, the browser blocked the player script. Share this message and the instance diagnostics below.</pre>
+  <noscript>JavaScript is disabled. Enable it to use the player.</noscript>
   <script nonce="{{NONCE}}">
     const video = document.getElementById('video');
     const message = document.getElementById('message');
     const details = document.getElementById('details');
+    const debug = document.getElementById('debug');
     const started = performance.now();
-    let hls, failed = false, stalls = 0, firstFrame = null, hasPlayed = false;
+    const entries = [];
+    let hls, failed = false, stalls = 0, firstFrame = null, hasPlayed = false, ready = false;
+    let playRequested = null, lastProgress = started, lastPosition = 0;
+    let thumbnailTimer, libraryTimer;
+    function log(text) {
+      entries.push(`${((performance.now() - started) / 1000).toFixed(1)}s ${text}`);
+      if (entries.length > 40) entries.shift();
+      debug.textContent = entries.join('\n');
+      debug.scrollTop = debug.scrollHeight;
+    }
+    log('JavaScript running. Checking the instance route before requesting media.');
     const say = text => { if (!failed) message.textContent = text; };
+    async function instanceStatus() {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      try {
+        const response = await fetch('{{STATUS}}', {signal: controller.signal, cache: 'no-store', redirect: 'error'});
+        if (!response.ok) throw new Error(`Instance status returned HTTP ${response.status}.`);
+        if (!response.headers.get('content-type')?.includes('application/json'))
+          throw new Error('Instance status returned HTML/non-JSON instead of the proxy. Cloud routing is still incorrect.');
+        const data = await response.json();
+        if (data.build !== 'instance-streaming-v2') throw new Error('The proxy is running a different build. Reboot the cloud app.');
+        return data;
+      } catch (error) {
+        if (error.name === 'AbortError') throw new Error('Instance status timed out after 10 seconds.');
+        if (error instanceof TypeError) throw new Error('Instance status could not be fetched (network, redirect or browser policy).');
+        throw error;
+      } finally { clearTimeout(timeout); }
+    }
     async function fail(text) {
       if (failed) return;
       failed = true;
       if (hls) hls.stopLoad();
+      video.pause();
+      clearTimeout(libraryTimer);
       message.className = 'error';
       message.textContent = text;
+      log(text);
+      details.textContent = 'Use “Refresh stream” above. Share the player and instance diagnostics.';
       try {
-        const response = await fetch('{{STATUS}}');
-        if (response.ok) {
-          const data = await response.json();
-          if (data.error) message.textContent = data.error;
-          details.textContent = `Instance: ${data.requests} upstream requests, ${(data.bytes / 1048576).toFixed(2)} MiB relayed. Use “Refresh stream” above.`;
-        }
-      } catch (_) { details.textContent = 'The instance could not be reached. Refresh the stream above.'; }
+        const data = await instanceStatus();
+        if (data.error) { message.textContent += ` Instance: ${data.error}`; log(data.error); }
+        log(`Instance: ${data.requests} upstream responses, ${(data.bytes / 1048576).toFixed(2)} MiB of media relayed.`);
+      } catch (error) { log(error.message); }
     }
-    video.addEventListener('loadedmetadata', () => say('Ready — press play. Seeking is available.'));
+    window.addEventListener('error', event => fail(`Player JavaScript error: ${event.error?.name || 'Error'} (line ${event.lineno}).`));
+    window.addEventListener('unhandledrejection', () => fail('Unhandled player JavaScript promise rejection.'));
+    document.addEventListener('securitypolicyviolation', event => fail(`Browser policy blocked ${event.effectiveDirective}.`));
+    video.addEventListener('loadedmetadata', () => { ready = true; log('Video metadata loaded.'); say('Ready — press play. Seeking is available.'); });
+    video.addEventListener('play', () => { if (playRequested === null) playRequested = performance.now(); lastProgress = performance.now(); });
     video.addEventListener('playing', () => {
       hasPlayed = true;
-      if (firstFrame === null) firstFrame = ((performance.now() - started) / 1000).toFixed(1);
+      lastProgress = performance.now();
+      if (firstFrame === null) firstFrame = ((performance.now() - (playRequested ?? started)) / 1000).toFixed(1);
+      log('Playback running.');
       say('Playing through the instance');
     });
     video.addEventListener('waiting', () => { if (hasPlayed && !video.seeking) stalls++; say('Buffering from the instance…'); });
-    video.addEventListener('seeking', () => say('Seeking — requesting only the needed media…'));
+    video.addEventListener('seeking', () => { lastProgress = performance.now(); log('Seek requested.'); say('Seeking — requesting only the needed media…'); });
     video.addEventListener('seeked', () => say(video.paused ? 'Paused' : 'Playing through the instance'));
     video.addEventListener('pause', () => say('Paused'));
     video.addEventListener('ended', () => say('Finished'));
     video.addEventListener('error', () => fail(`Playback failed (media code ${video.error?.code || 'unknown'}).`));
     const timer = setInterval(() => {
       if (failed) return;
+      const now = performance.now();
+      if (!ready && now - started > 30000) return fail('Playback startup timed out after 30 seconds. See the last completed stage below.');
+      if (Math.abs(video.currentTime - lastPosition) > 0.05) { lastPosition = video.currentTime; lastProgress = now; }
+      if (ready && (video.seeking || (!video.paused && !video.ended)) && now - lastProgress > 30000)
+        return fail('Playback or seeking stalled for 30 seconds. See the instance HTTP codes below.');
       let ahead = 0;
       for (let i = 0; i < video.buffered.length; i++) {
         if (video.buffered.start(i) <= video.currentTime && video.buffered.end(i) >= video.currentTime)
           ahead = video.buffered.end(i) - video.currentTime;
       }
-      details.textContent = `Buffered: ${ahead.toFixed(1)}s · Rebuffers: ${stalls} · Player ready/first play: ${firstFrame ?? '—'}s · Instance-only media`;
+      details.textContent = `Buffered: ${ahead.toFixed(1)}s · Rebuffers: ${stalls} · Play-to-start: ${firstFrame ?? '—'}s · readyState=${video.readyState} networkState=${video.networkState}`;
     }, 1000);
-    if ('{{MODE}}' === 'mp4' || video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = '{{SOURCE}}';
-    } else {
+    async function start() {
+      say('Checking the instance streaming route…');
+      await instanceStatus();
+      if (failed) return;
+      log('Instance route OK (JSON, build v2).');
+      const poster = new Image();
+      thumbnailTimer = setTimeout(() => log('Thumbnail request timed out after 12 seconds; video will still be attempted.'), 12000);
+      poster.onload = () => { clearTimeout(thumbnailTimer); log('Thumbnail loaded through the instance.'); };
+      poster.onerror = () => { clearTimeout(thumbnailTimer); log('Thumbnail failed. Check the instance diagnostics for its HTTP code.'); };
+      poster.src = '{{POSTER}}';
+      video.poster = '{{POSTER}}';
+      if ('{{MODE}}' === 'mp4' || video.canPlayType('application/vnd.apple.mpegurl')) {
+        log('Using native {{MODE}} playback. Requesting media metadata.');
+        say('Loading media metadata through the instance…');
+        video.src = '{{SOURCE}}';
+        return;
+      }
+      log('Loading hls.js through the instance.');
       const script = document.createElement('script');
       script.src = '{{LIBRARY}}';
+      libraryTimer = setTimeout(() => fail('The HLS player library timed out after 15 seconds.'), 15000);
       script.onerror = () => fail('The instance could not load the HLS player library.');
       script.onload = () => {
+        clearTimeout(libraryTimer);
+        if (failed) return;
+        log('hls.js loaded.');
         if (!window.Hls || !Hls.isSupported()) return fail('This browser does not support HLS playback. Try Safari or a current Chromium browser.');
         hls = new Hls({
           maxBufferLength: 30, maxMaxBufferLength: 60, backBufferLength: 30,
           maxBufferSize: 30 * 1024 * 1024, startLevel: 0, enableWorker: true,
         });
-        hls.on(Hls.Events.ERROR, (_, data) => { if (data.fatal) fail(`Streaming failed: ${data.details}.`); });
+        hls.on(Hls.Events.MANIFEST_LOADED, () => log('Master playlist loaded.'));
+        hls.on(Hls.Events.LEVEL_LOADED, () => log('Video playlist loaded.'));
+        hls.on(Hls.Events.AUDIO_TRACK_LOADED, () => log('Audio playlist loaded.'));
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          log(`HLS ${data.type}: ${data.details}; fatal=${data.fatal}; HTTP=${data.response?.code ?? 'n/a'}`);
+          if (data.fatal) fail(`Streaming failed: ${data.details}.`);
+        });
+        say('Loading playlists and media through the instance…');
         hls.loadSource('{{SOURCE}}');
         hls.attachMedia(video);
       };
       document.head.appendChild(script);
     }
-    window.addEventListener('pagehide', () => { clearInterval(timer); if (hls) hls.destroy(); video.removeAttribute('src'); video.load(); });
+    start().catch(error => fail(error.message));
+    window.addEventListener('pagehide', () => { clearInterval(timer); clearTimeout(thumbnailTimer); clearTimeout(libraryTimer); if (hls) hls.destroy(); video.removeAttribute('src'); video.load(); });
   </script>
 </body>
 </html>

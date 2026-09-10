@@ -17,7 +17,12 @@ def test_ui_uses_only_local_player_and_does_not_resolve_on_rerun():
         app.button[0].click().run()
         assert not app.exception and resolve.call_count == 1
         assert app.text[0].value == video.title
-        assert app.get("iframe")[0].proto.src.startswith("/_ytview/player/")
+        player = app.get("iframe")[0].proto
+        assert not player.src
+        assert "Player HTML loaded" in player.srcdoc
+        assert f"_ytview/status/{app.session_state['playback']['token']}" in player.srcdoc
+        assert "fetch('/_ytview/" not in player.srcdoc
+        assert app.json
         app.run()
         assert resolve.call_count == 1
         REGISTRY.discard(app.session_state["playback"]["token"])

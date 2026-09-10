@@ -6,7 +6,8 @@ import streamlit.components.v1 as components
 from tornado.web import HTTPError
 
 from sources import SourceError, extract_video_id, resolve_video
-from streaming import REGISTRY
+from player import render_player
+from streaming import BUILD, REGISTRY
 from streamlit_proxy import ensure_proxy
 
 st.set_page_config(page_title="YTView", layout="centered")
@@ -17,7 +18,7 @@ try:
     prefix = ensure_proxy()
 except Exception as exc:
     logging.getLogger(__name__).error("Streaming route setup failed: %s", type(exc).__name__)
-    st.error("The instance streaming routes could not start. Check the pinned dependencies and reboot the app. No direct-browser fallback is enabled.")
+    st.error(f"The instance streaming routes could not start ({type(exc).__name__}; Streamlit {st.__version__}). Check the pinned dependencies and reboot the app. No direct-browser fallback is enabled.")
     st.stop()
 
 with st.form("open_video"):
@@ -54,21 +55,34 @@ if submitted or refresh:
                 st.rerun()
             except SourceError as exc:
                 st.error(str(exc))
-            except Exception:
-                st.error("Stream setup failed on the instance. Try again; no direct-browser fallback was attempted.")
+            except Exception as exc:
+                st.error(f"Stream setup failed on the instance ({type(exc).__name__}). Try again; no direct-browser fallback was attempted.")
+
+
+@st.fragment(run_every=3)
+def show_diagnostics(token):
+    with st.expander("Instance diagnostics — updates every 3 seconds", expanded=True):
+        st.caption("Safe to share: stages, HTTP codes and counts only; no source URLs or playback tokens.")
+        try:
+            st.json(REGISTRY.get(token).snapshot(), expanded=True)
+        except HTTPError:
+            st.warning("Playback expired or the instance restarted. Click Refresh stream.")
 
 current = st.session_state.get("playback")
 if current:
     try:
-        REGISTRY.get(current["token"])
+        ticket = REGISTRY.get(current["token"])
     except HTTPError:
         st.warning("This playback session expired or the instance restarted. Click Refresh stream.")
     else:
         st.text(current["title"])
-        components.iframe(f"{prefix}/player/{current['token']}", height=475, scrolling=False)
+        # srcdoc renders even if cloud routing fails, so errors stay visible.
+        # Its relative URLs inherit the app document's /~/+/ (or local) base.
+        components.html(render_player(ticket, "_ytview"), height=660, scrolling=True)
         st.caption(f"{current['mode'].upper()} · up to {current['actual_height']}p · Metadata resolved in {current['resolved_seconds']}s")
+        show_diagnostics(current["token"])
         with st.expander("Playback troubleshooting"):
             st.write("Try 360p if the instance cannot sustain 720p. Forward/backward seeks fetch only the needed segments or byte ranges. Refresh stream renews expired source URLs.")
             st.write("For a bug report: include whether the thumbnail appears, time until playback, audio, forward/backward seeking, rebuffer count, and any error shown inside the player.")
 
-st.caption("Build: instance-streaming-v1 · HLS audio/video + range proxy · no RapidAPI")
+st.caption(f"Build: {BUILD} · cloud-relative routes + visible diagnostics · no RapidAPI")

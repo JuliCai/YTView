@@ -1,7 +1,7 @@
 """Same-origin, bounded-memory HLS and HTTP-range relay. No transcoding or video files."""
 
 import asyncio
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 import hashlib
 import re
@@ -17,6 +17,7 @@ from tornado.web import HTTPError, RequestHandler
 from sources import SourceError, Video, validate_upstream
 
 CHUNK_SIZE = 64 * 1024
+BUILD = "instance-streaming-v2"
 MAX_MANIFEST = 2 * 1024 * 1024
 MAX_RANGE = 2 * 1024 * 1024
 TICKET_TTL = 6 * 60 * 60
@@ -40,7 +41,21 @@ class Ticket:
     error: str = ""
     requests: int = 0
     bytes_sent: int = 0
+    events: deque = field(default_factory=lambda: deque(maxlen=40), repr=False)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+
+    def record(self, stage: str, **details):
+        # Callers provide only stage names, counts, HTTP codes and exception types.
+        # Never put upstream URLs, headers, tokens or raw exceptions here.
+        with self.lock:
+            self.events.append({"seconds": round(time.monotonic() - self.created, 1),
+                                "stage": stage, **details})
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return {"build": BUILD, "mode": self.video.mode, "requests": self.requests,
+                    "bytes": self.bytes_sent, "error": self.error,
+                    "registered_resources": len(self.resources), "events": list(self.events)}
 
     def add(self, resource: Resource, prefix: str) -> str:
         validate_upstream(resource.url, thumbnail=resource.kind == "thumbnail")
@@ -226,15 +241,17 @@ class BaseHandler(RequestHandler):
 class ManifestHandler(BaseHandler):
     def get(self, token):
         ticket = REGISTRY.get(token)
+        ticket.record("master playlist requested")
         self.set_header("Content-Type", "application/vnd.apple.mpegurl")
-        self.finish(master_playlist(ticket, self.prefix))
+        # Relative to /_ytview/master/<token>, preserving any cloud edge prefix.
+        self.finish(master_playlist(ticket, ".."))
 
 
 class StatusHandler(BaseHandler):
     def get(self, token):
         ticket = REGISTRY.get(token)
-        with ticket.lock:
-            self.finish({"requests": ticket.requests, "bytes": ticket.bytes_sent, "error": ticket.error})
+        ticket.record("browser status probe")
+        self.finish(ticket.snapshot())
 
 
 class ResourceHandler(BaseHandler):
@@ -253,11 +270,13 @@ class ResourceHandler(BaseHandler):
             self.finish("The instance is busy. Retry shortly.")
             return
         headers = upstream_headers(source, self.request.headers.get("Range"))
+        ticket.record("upstream request", kind=source.kind, method=self.request.method)
         self.task = asyncio.current_task()
         self.relay.active += 1
         response = None
         try:
             response = await self.relay.open(source, headers, self.request.method)
+            ticket.record("upstream response", kind=source.kind, http=response.status_code)
             with ticket.lock:
                 ticket.requests += 1
             if response.status_code == 416:
@@ -294,7 +313,9 @@ class ResourceHandler(BaseHandler):
                     return
                 body = await read_bounded(response, MAX_MANIFEST)
                 final_source = Resource(str(response.url), source.headers, source.kind)
-                rewritten = rewrite_manifest(body.decode("utf-8-sig"), final_source, ticket, self.prefix)
+                # This response lives at /_ytview/resource/<token>/<key>.
+                rewritten = rewrite_manifest(body.decode("utf-8-sig"), final_source, ticket, "../..")
+                ticket.record("playlist rewritten", size=len(body))
                 self.set_header("Content-Type", "application/vnd.apple.mpegurl")
                 self.finish(rewritten)
                 return
@@ -302,6 +323,7 @@ class ResourceHandler(BaseHandler):
                 if mime not in {"image/jpeg", "image/png", "image/webp"}:
                     raise SourceError("The source returned an invalid thumbnail.")
                 body = await read_bounded(response, MAX_MANIFEST)
+                ticket.record("thumbnail relayed", size=len(body))
                 self.set_header("Content-Type", mime)
                 self.finish(body)
                 return
@@ -323,6 +345,7 @@ class ResourceHandler(BaseHandler):
             self.finish()
         except (SourceError, httpx.HTTPError, UnicodeError) as exc:
             message = str(exc) if isinstance(exc, SourceError) else "The instance lost its upstream connection. Refresh the stream."
+            ticket.record("upstream failure", kind=source.kind, exception=type(exc).__name__)
             with ticket.lock:
                 ticket.error = message
             if not self._headers_written:

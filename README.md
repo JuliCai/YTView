@@ -44,7 +44,7 @@ macOS and on Linux in Community Cloud. No extra exposed port is needed.
 
 Community Cloud should track **JuliCai/YTView → main → app.py**. Pushing to that
 branch triggers its update; dependency changes can require a rebuild/reboot. The
-footer **Build: instance-streaming-v1** identifies this deployment. Existing
+footer **Build: instance-streaming-v2** identifies this deployment. Existing
 `RAPIDAPI_KEY` secrets can be removed; the application no longer reads them.
 
 **Keep Streamlit pinned to 1.54.0 and the Tornado backend enabled.** This version
@@ -55,6 +55,16 @@ server event loop. It is tested but relies on private Streamlit internals. Chang
 Streamlit versions requires revalidating this adapter. Failure stops playback,
 never bypasses the proxy. Community Cloud's edge routing/buffering still needs a
 deployment test; a local test cannot prove those platform properties.
+
+Community Cloud embeds the app under `/~/+/`. All player/playlist URLs are
+document-relative so this hosting prefix (and any configured base path) survives
+every request. The player HTML is sent through Streamlit as `srcdoc`, not fetched
+from an origin-root URL that Cloud replaces with its hosting page.
+
+The player displays startup stages and stops silent loading after 30 seconds
+(10 seconds for the initial proxy check). **Instance diagnostics** updates every
+3 seconds and shows bounded stage/HTTP/error-type history even when the browser
+cannot reach the proxy. Neither diagnostic panel exposes signed URLs or tokens.
 
 ## Current limitations
 
@@ -77,6 +87,9 @@ Install requirements-dev.txt and run `python -m pytest -q`. The tests are offlin
 mock upstreams verify incremental delivery, byte ranges, seeking, `HEAD`, unsafe
 redirect rejection, playlist rewriting, expiration, and same-port route precedence.
 They do not require a working local YouTube connection.
+Browser regressions emulate Cloud's nested iframe, path prefix, wrong HTML
+responses, HTTP failures and hung requests. They use an existing Chromium browser
+(optionally selected by `PLAYWRIGHT_CHROMIUM_EXECUTABLE`); they skip if none is installed.
 
 Cloud acceptance checklist:
 
