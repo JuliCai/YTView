@@ -8,6 +8,7 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 import pytest
 from yt_dlp import YoutubeDL
 from yt_dlp.networking import Response
@@ -90,9 +91,34 @@ def local_origin():
 
         def do_GET(self):
             calls.append((self.path, self.headers.get("Range")))
+            if self.path.startswith("/redirect-code-"):
+                self.send_response(int(self.path.rsplit("-", 1)[-1]))
+                self.send_header("Location", "/media")
+                self.end_headers()
+                return
             if self.path == "/redirect":
                 self.send_response(302)
-                self.send_header("Location", "/must-not-follow")
+                self.send_header("Location", "/media")
+                self.end_headers()
+            elif self.path == "/redirect-denied":
+                self.send_response(302)
+                self.send_header("Location", "/denied")
+                self.end_headers()
+            elif self.path == "/loop":
+                self.send_response(302)
+                self.send_header("Location", "/loop")
+                self.end_headers()
+            elif self.path == "/unsafe":
+                self.send_response(302)
+                self.send_header("Location", "https://untrusted.invalid/private?signature=secret")
+                self.end_headers()
+            elif self.path == "/missing":
+                self.send_response(302)
+                self.end_headers()
+            elif self.path.startswith("/chain/"):
+                index = int(self.path.rsplit("/", 1)[-1])
+                self.send_response(302)
+                self.send_header("Location", f"/chain/{index + 1}" if index < 2 else "/media")
                 self.end_headers()
             elif self.path == "/denied":
                 self.send_response(403)
@@ -124,18 +150,137 @@ def local_origin():
         thread.join(timeout=2)
 
 
-@pytest.mark.parametrize("path, expected, status_code", [
-    ("/media", "ok", 200), ("/denied", "http_error", 403), ("/redirect", "redirect_not_followed", 302),
+@pytest.mark.parametrize("path, expected, chain, paths", [
+    ("/media", "ok", [200], ["/media"]),
+    ("/denied", "http_error", [403], ["/denied"]),
+    ("/redirect", "ok", [302, 200], ["/redirect", "/media"]),
+    ("/redirect-denied", "http_error", [302, 403], ["/redirect-denied", "/denied"]),
 ])
-def test_real_native_and_httpx_transports_match_without_following_redirects(path, expected, status_code):
+def test_real_native_and_httpx_transports_follow_validated_redirects(path, expected, chain, paths):
     with local_origin() as (base, calls):
         native = probe._native_sample(base + path, HEADERS)
         relay = asyncio.run(probe._httpx_sample(base + path, HEADERS))
     assert native["outcome"] == relay["outcome"] == expected
-    assert native["http_status"] == relay["http_status"] == status_code
-    assert calls == [(path, HEADERS["Range"]), (path, HEADERS["Range"])]
+    assert native["http_status"] == relay["http_status"] == chain[-1]
+    assert native["http_chain"] == relay["http_chain"] == chain
+    assert calls == [(request_path, HEADERS["Range"]) for request_path in paths * 2]
     if expected == "ok":
         assert native["bytes_read"] == relay["bytes_read"] == probe.SAMPLE_BYTES
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_each_redirect_status_preserves_sample_range(code):
+    path = f"/redirect-code-{code}"
+    with local_origin() as (base, calls):
+        native = probe._native_sample(base + path, HEADERS)
+        relay = asyncio.run(probe._httpx_sample(base + path, HEADERS))
+    assert native["http_chain"] == relay["http_chain"] == [code, 200]
+    assert native["outcome"] == relay["outcome"] == "ok"
+    assert calls == [(request_path, HEADERS["Range"]) for request_path in [path, "/media"] * 2]
+
+
+@pytest.mark.parametrize("path, outcome, count", [
+    ("/unsafe", "redirect_blocked", 1),
+    ("/missing", "invalid_redirect", 1),
+    ("/loop", "redirect_limit", probe.MAX_REQUESTS),
+])
+def test_redirect_safety_and_request_limits(path, outcome, count):
+    with local_origin() as (base, calls):
+        native = probe._native_sample(base + path, HEADERS)
+        relay = asyncio.run(probe._httpx_sample(base + path, HEADERS))
+    assert native["outcome"] == relay["outcome"] == outcome
+    assert native["http_chain"] == relay["http_chain"] == [302] * count
+    assert native["bytes_read"] == relay["bytes_read"] == 0
+    assert len(calls) == 2 * count
+    assert all(request_path == path for request_path, _ in calls)
+    assert "untrusted" not in json.dumps([native, relay])
+    assert "secret" not in json.dumps([native, relay])
+
+
+def test_three_redirects_can_reach_media_within_four_request_budget():
+    with local_origin() as (base, calls):
+        native = probe._native_sample(base + "/chain/0", HEADERS)
+        relay = asyncio.run(probe._httpx_sample(base + "/chain/0", HEADERS))
+    assert native["http_chain"] == relay["http_chain"] == [302, 302, 302, 200]
+    assert native["outcome"] == relay["outcome"] == "ok"
+    assert native["bytes_read"] == relay["bytes_read"] == probe.SAMPLE_BYTES
+    assert len(calls) == 8
+
+
+def test_native_redirect_responses_are_closed_without_reading_bodies():
+    body = CountedBody(b"secret redirect body")
+    redirect = Response(body, url=URL, headers={"Location": "/final?signature=secret"}, status=302)
+    final = Response(io.BytesIO(b"media"), url=URL, headers={"Content-Type": "video/mp4", "Content-Length": "5"}, status=200)
+    with patch.object(YoutubeDL, "urlopen", side_effect=[YtdlpHTTPError(redirect), final]):
+        result = probe._native_sample(URL, HEADERS)
+    assert result["outcome"] == "ok" and result["http_chain"] == [302, 200]
+    assert redirect.closed and final.closed and body.bytes_read == 0
+
+
+class CountedStream(httpx.AsyncByteStream):
+    def __init__(self, body):
+        self.body = body
+        self.bytes_read = 0
+        self.closed = False
+
+    async def __aiter__(self):
+        self.bytes_read += len(self.body)
+        yield self.body
+
+    async def aclose(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize("location, allowed", [
+    ("/next?signature=secret", True),
+    ("//other.googlevideo.com/next?signature=secret", True),
+    ("https://other.googlevideo.com/next?signature=secret", True),
+    ("https://127.0.0.1/private", False),
+    ("http://r.googlevideo.com/private", False),
+    ("https://r.googlevideo.com.untrusted.invalid/private", False),
+    ("https://user@r.googlevideo.com/private", False),
+    ("https://r.googlevideo.com:444/private", False),
+    ("https://i.ytimg.com/private", False),
+    ("file:///private", False),
+])
+def test_real_allowlist_validates_each_redirect_before_either_transport_sends(location, allowed):
+    redirect_body = CountedBody(b"secret redirect body")
+    redirect = Response(redirect_body, url=URL, headers={"Location": location}, status=302)
+    final = Response(io.BytesIO(b"media"), url=URL, headers={"Content-Type": "video/mp4", "Content-Length": "5"}, status=200)
+    with patch.object(YoutubeDL, "urlopen", side_effect=[YtdlpHTTPError(redirect), final]) as request:
+        native = probe._native_sample(URL, HEADERS)
+    assert request.call_count == (2 if allowed else 1)
+    assert all(call.args[0].headers["Range"] == HEADERS["Range"] for call in request.call_args_list)
+    assert redirect.closed and redirect_body.bytes_read == 0
+    assert final.closed if allowed else not final.closed
+    final.close()
+
+    redirect_stream = CountedStream(b"secret redirect body")
+    media_stream = CountedStream(b"media")
+    requests = []
+
+    def send(request):
+        requests.append(request)
+        assert request.headers["Range"] == HEADERS["Range"]
+        assert "Cookie" not in request.headers
+        if len(requests) == 1:
+            return httpx.Response(302, headers={"Location": location, "Set-Cookie": "probe=secret; Path=/"},
+                                  stream=redirect_stream)
+        assert allowed
+        return httpx.Response(200, headers={"Content-Type": "video/mp4", "Content-Length": "5"}, stream=media_stream)
+
+    async def run_httpx():
+        client = httpx.AsyncClient(transport=httpx.MockTransport(send), trust_env=False)
+        with patch("segment_probe.Relay", return_value=SimpleNamespace(client=client)):
+            return await probe._httpx_sample(URL, HEADERS)
+
+    relay = asyncio.run(run_httpx())
+    assert native["outcome"] == relay["outcome"] == ("ok" if allowed else "redirect_blocked")
+    assert native["http_chain"] == relay["http_chain"] == ([302, 200] if allowed else [302])
+    assert len(requests) == (2 if allowed else 1)
+    assert redirect_stream.closed and redirect_stream.bytes_read == 0
+    assert media_stream.closed == allowed
+    assert "secret" not in json.dumps([native, relay])
 
 
 def test_sample_ranges_are_bounded_and_preserve_start():
@@ -148,12 +293,14 @@ def test_sample_ranges_are_bounded_and_preserve_start():
 
 def test_worker_receives_secrets_only_on_stdin_and_only_safe_fields_return():
     sample = {"outcome": "http_error", "http_status": 403, "bytes_read": 0, "seconds": 0.2,
+              "http_chain": [302, 403],
               "url": URL, "error_body": "private data"}
     with patch("segment_probe.subprocess.run", return_value=SimpleNamespace(
             returncode=0, stdout=json.dumps({"native_ytdlp": sample, "relay_httpx": sample}))) as run:
         result = probe.run_segment_probe(ticket())
     assert result["state"] == "complete"
     assert "Both clients were denied" in result["interpretation"]
+    assert result["native_ytdlp"]["http_chain"] == [302, 403]
     assert "signature" not in json.dumps(result) and "private" not in json.dumps(result)
     args, kwargs = run.call_args
     assert URL not in " ".join(args[0])
@@ -177,6 +324,21 @@ def test_bad_worker_output_is_not_forwarded():
         result = probe.run_segment_probe(ticket())
     assert result["state"] == "error"
     assert URL not in json.dumps(result)
+
+
+def test_redirect_chain_fields_cannot_leak_urls():
+    raw = {"outcome": "http_error", "http_status": 403, "bytes_read": 0, "seconds": 0.2,
+           "http_chain": [302, URL, 403]}
+    with pytest.raises(ValueError):
+        probe._clean_result(raw)
+
+
+@pytest.mark.parametrize("chain", [[302] * (probe.MAX_REQUESTS + 1), [302, 200], [], [302, 600]])
+def test_malformed_or_oversized_worker_chains_are_rejected(chain):
+    raw = {"outcome": "http_error", "http_status": 403, "bytes_read": 0, "seconds": 0.2,
+           "http_chain": chain}
+    with pytest.raises(ValueError):
+        probe._clean_result(raw)
 
 
 def test_missing_target_and_pending_source_wait_do_not_launch_worker():

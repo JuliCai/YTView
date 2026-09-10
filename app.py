@@ -100,6 +100,7 @@ def show_segment_comparison(token):
         st.caption(
             f"Run after a playback attempt. Tests the captured media URL, not a fresh extraction. "
             f"At most {SAMPLE_BYTES:,} body bytes per client; {WORKER_TIMEOUT}s hard timeout. "
+            "Follows only validated media redirects and shows the HTTP status chain. "
             "Runs only on this instance, with no video file or direct-browser request."
         )
         if st.button("Run bounded segment comparison", key="run_segment_comparison"):

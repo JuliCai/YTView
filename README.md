@@ -44,7 +44,7 @@ macOS and on Linux in Community Cloud. No extra exposed port is needed.
 
 Community Cloud should track **JuliCai/YTView → main → app.py**. Pushing to that
 branch triggers its update; dependency changes can require a rebuild/reboot. The
-footer **Build: instance-streaming-v4** identifies this deployment. Existing
+footer **Build: instance-streaming-v5** identifies this deployment. Existing
 `RAPIDAPI_KEY` secrets can be removed; the application no longer reads them.
 
 **After code updates, use Manage app → Reboot app in Community Cloud.** Python
@@ -99,7 +99,7 @@ Diagnostics include the selected profile, initial/remaining source wait, request
 range presence, and whether HTTPX re-encoded the URL (a boolean, never its contents).
 An accessible playlist does not prove that its signed segments will be accepted.
 
-### Bounded cloud-side segment comparison (v4)
+### Bounded cloud-side segment comparison (v5)
 
 After attempting playback, expand **Compare media request — yt-dlp vs relay** and
 click **Run bounded segment comparison**. It runs only on demand, on the instance,
@@ -113,12 +113,18 @@ and retains its result across ordinary UI reruns. No local YouTube testing is ne
 - Both clients use direct IPv4 and a matching bounded range. Each sample consumes
 	at most **10,241 body bytes**, discarding them in memory. The capped range can
 	differ from the original playback request; successful samples do not prove playback.
-- Redirects are disabled for both diagnostic clients, and redirected responses are
-	marked inconclusive. The normal relay's validated-redirect behavior is unchanged.
+- Both diagnostic clients follow redirects manually, validating each destination
+	before connecting: HTTPS Googlevideo hosts only. At most **four requests per
+	client** (three redirects and a final response) are allowed. The original sample
+	range is preserved, and intermediate bodies are closed without being read. An
+	unsafe/missing destination or redirect loop fails closed. Playback is unchanged.
+- Results include `http_chain`, for example `[302, 403]` or `[302, 206]`, and the
+	final `http_status`. Destination URLs and headers are never included. This replaces
+	v4's inconclusive stop at the first redirect.
 - An isolated worker has a **35-second hard timeout**, with one comparison admitted
 	at a time. No video file, full-video download, automatic retry or browser fallback.
 - Signed URLs travel to the worker via stdin, never command-line arguments. Only
-	allowlisted result fields reach the UI: statuses, byte counts, durations, outcome
+	allowlisted result fields reach the UI: status chains, byte counts, durations, outcome
 	labels and exception class names. No URLs, cookies or remote error bodies.
 
 Share the comparison JSON. Native success with HTTPX 403 points to a transport or
