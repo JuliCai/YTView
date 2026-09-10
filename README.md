@@ -44,7 +44,7 @@ macOS and on Linux in Community Cloud. No extra exposed port is needed.
 
 Community Cloud should track **JuliCai/YTView → main → app.py**. Pushing to that
 branch triggers its update; dependency changes can require a rebuild/reboot. The
-footer **Build: instance-streaming-v2** identifies this deployment. Existing
+footer **Build: instance-streaming-v3** identifies this deployment. Existing
 `RAPIDAPI_KEY` secrets can be removed; the application no longer reads them.
 
 **After code updates, use Manage app → Reboot app in Community Cloud.** Python
@@ -74,6 +74,30 @@ The player displays startup stages and stops silent loading after 30 seconds
 (10 seconds for the initial proxy check). **Instance diagnostics** updates every
 3 seconds and shows bounded stage/HTTP/error-type history even when the browser
 cannot reach the proxy. Neither diagnostic panel exposes signed URLs or tokens.
+
+### Playlist loads, but a media segment returns 403
+
+Build v3 preserves yt-dlp's `available_at` deadline. YouTube can require a
+pre-playback wait even while its playlists are already accessible. The player
+shows a countdown, and the relay independently enforces the deadline. Waiting is
+capped at two minutes, with the usual 30-second startup timeout beginning after
+that wait. There is no video download or conversion during the countdown.
+
+Metadata extraction and relaying both use direct IPv4, ignoring environment
+proxies, to reduce mismatches for IP-bound media URLs. This does not guarantee a
+stable public egress IP on a shared host and cannot fix an IP block.
+
+If segments still return 403, select the other **YouTube client profile** and click
+**Load video**. Automatic uses yt-dlp's defaults; Safari explicitly selects
+`web_safari` server-side. Refresh stream keeps the profile used to load the video.
+See the [yt-dlp PO Token Guide](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide)
+for current client/token requirements. These vary over time; a server-side PO token
+provider or different hosting may be needed if both profiles fail. None of these
+options sends YouTube requests from the user's browser.
+
+Diagnostics include the selected profile, initial/remaining source wait, request
+range presence, and whether HTTPX re-encoded the URL (a boolean, never its contents).
+An accessible playlist does not prove that its signed segments will be accepted.
 
 ## Current limitations
 

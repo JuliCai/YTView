@@ -1,12 +1,16 @@
 """Resolve metadata only. Upstream URLs must never be rendered in Streamlit."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import math
 import re
 from urllib.parse import parse_qs, urlsplit
 
 from deno import find_deno_bin
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
+
+CLIENT_PROFILES = {"auto": "Automatic (yt-dlp default)", "web_safari": "Safari HLS (server-side)"}
+MAX_SOURCE_WAIT = 120
 
 
 class SourceError(Exception):
@@ -63,6 +67,7 @@ class Track:
     codec: str = ""
     height: int = 0
     bandwidth: int = 1_000_000
+    available_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -73,6 +78,12 @@ class Video:
     mode: str
     tracks: tuple[Track, ...]
     audio: Track | None = None
+    client_profile: str = "auto"
+
+    @property
+    def available_at(self) -> float:
+        tracks = (*self.tracks, self.audio) if self.audio else self.tracks
+        return max((track.available_at for track in tracks), default=0.0)
 
 
 class QuietLogger:
@@ -92,12 +103,19 @@ def select_video(info: dict, video_id: str, max_height: int) -> Video:
         raise SourceError("Use a finished video for now; live/DVR streams are not supported yet.")
 
     def track(fmt: dict) -> Track:
+        try:
+            available_at = float(fmt.get("available_at") or 0)
+        except (TypeError, ValueError):
+            raise SourceError("YouTube returned invalid playback availability timing.") from None
+        if not math.isfinite(available_at):
+            raise SourceError("YouTube returned invalid playback availability timing.")
         return Track(
             validate_upstream(fmt["url"]),
             {**info.get("http_headers", {}), **fmt.get("http_headers", {})},
             (fmt.get("vcodec") if fmt.get("vcodec") != "none" else fmt.get("acodec")) or "",
             int(fmt.get("height") or 0),
             max(64_000, int((fmt.get("tbr") or (128 if fmt.get("vcodec") == "none" else 1000)) * 1000)),
+            available_at=available_at,
         )
 
     formats = [f for f in info.get("formats", []) if f.get("url") and not f.get("has_drm")]
@@ -133,15 +151,22 @@ def select_video(info: dict, video_id: str, max_height: int) -> Video:
     raise SourceError("YouTube did not provide a compatible stream with audio. Try another video.")
 
 
-def resolve_video(video_id: str, max_height: int = 720) -> Video:
+def resolve_video(video_id: str, max_height: int = 720, *, client_profile: str = "auto") -> Video:
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
         raise SourceError("Invalid video ID.")
+    if client_profile not in CLIENT_PROFILES:
+        raise SourceError("Unsupported YouTube client profile.")
     options = {
         "quiet": True, "no_warnings": True, "logger": QuietLogger(),
         "skip_download": True, "noplaylist": True, "cachedir": False,
         "socket_timeout": 12, "retries": 1, "extractor_retries": 1,
+        # Match the relay: don't resolve IP-bound URLs through an environment
+        # proxy or a different address family than the media requests.
+        "proxy": "", "source_address": "0.0.0.0",
         "js_runtimes": {"deno": {"path": str(find_deno_bin())}},
     }
+    if client_profile != "auto":
+        options["extractor_args"] = {"youtube": {"player_client": [client_profile]}}
     try:
         with YoutubeDL(options) as ydl:
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
@@ -155,4 +180,4 @@ def resolve_video(video_id: str, max_height: int = 720) -> Video:
         raise SourceError("The instance could not read this video from YouTube. It may be unavailable or restricted.") from None
     if not isinstance(info, dict):
         raise SourceError("YouTube returned no video metadata.")
-    return select_video(info, video_id, max_height)
+    return replace(select_video(info, video_id, max_height), client_profile=client_profile)

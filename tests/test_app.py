@@ -69,3 +69,19 @@ def test_stale_routes_show_reboot_instructions():
         assert not app.exception
         assert "Reboot app" in app.error[0].value
         assert not app.text_input
+
+
+def test_selected_client_profile_is_preserved_on_refresh():
+    video = Video("jNQXAC9IVRw", "Example", 60, "hls",
+                  (Track("https://r.googlevideo.com/video", {}, "avc1", 720),))
+    with patch("streamlit_proxy.ensure_proxy", return_value="/_ytview"), patch("sources.resolve_video", return_value=video) as resolve:
+        app = AppTest.from_file("app.py").run()
+        app.text_input[0].set_value("jNQXAC9IVRw")
+        app.selectbox[1].select("web_safari")
+        app.button[0].click().run()
+        assert not app.exception
+        resolve.assert_called_with("jNQXAC9IVRw", 720, client_profile="web_safari")
+        app.button[1].click().run()
+        assert not app.exception and resolve.call_count == 2
+        resolve.assert_called_with("jNQXAC9IVRw", 720, client_profile="web_safari")
+        REGISTRY.discard(app.session_state["playback"]["token"])

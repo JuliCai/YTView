@@ -32,7 +32,7 @@ def browser():
         instance.close()
 
 
-def open_player(browser, status="ok", app_path="/~/+/"):
+def open_player(browser, status="ok", app_path="/~/+/", source_wait=0):
     ticket = Ticket(Video("jNQXAC9IVRw", "Example", 60, "hls",
                           (Track("https://r.googlevideo.com/video", {}, "avc1", 720),)))
     player = render_player(ticket, "_ytview")
@@ -59,7 +59,8 @@ def open_player(browser, status="ok", app_path="/~/+/"):
             elif status == "500":
                 route.fulfill(status=500, content_type="text/plain", body="Internal server error.")
             else:
-                route.fulfill(content_type="application/json", body=json.dumps(ticket.snapshot()))
+                route.fulfill(content_type="application/json", body=json.dumps(
+                    {**ticket.snapshot(), "source_wait_seconds": source_wait}))
         elif url.path.startswith(app_path + "_ytview/resource/"):
             route.fulfill(content_type="image/png", body=base64.b64decode(
                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j2ioAAAAASUVORK5CYII="))
@@ -113,5 +114,18 @@ def test_startup_cannot_spin_forever(browser):
     playwright.expect(frame.locator("#debug")).to_contain_text("hls.js loaded.")
     page.clock.fast_forward(31000)
     playwright.expect(frame.locator("#message")).to_contain_text("startup timed out after 30 seconds")
+    assert not errors
+    page.close()
+
+
+def test_source_wait_has_countdown_and_does_not_trip_startup_watchdog(browser):
+    page, frame, requests, errors = open_player(browser, source_wait=40)
+    playwright.expect(frame.locator("#message")).to_contain_text("pre-playback wait")
+    assert not any(path.endswith("hls.js") for path in requests)
+    page.clock.fast_forward(31000)
+    playwright.expect(frame.locator("#message")).to_contain_text("pre-playback wait")
+    assert not any(path.endswith("hls.js") for path in requests)
+    page.clock.fast_forward(10000)
+    playwright.expect(frame.locator("#debug")).to_contain_text("hls.js loaded.")
     assert not errors
     page.close()

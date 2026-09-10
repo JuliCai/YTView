@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import aclosing
-from unittest.mock import patch
+from dataclasses import replace
+from unittest.mock import AsyncMock, patch
 from urllib.parse import urljoin
 
 import httpx
@@ -156,6 +157,39 @@ class RelayHTTPTest(AsyncHTTPTestCase):
         response = self.fetch(self.path)
         assert response.code == 503
         assert response.headers["Retry-After"] == "2"
+
+    def test_relay_uses_direct_ipv4_transport(self):
+        assert self.relay.client._transport._pool._local_address == "0.0.0.0"
+        assert not self.relay.client._trust_env
+
+    @gen_test
+    async def test_source_deadline_is_honored_before_upstream_request(self):
+        self.ticket.video = replace(VIDEO, tracks=(replace(VIDEO.tracks[0], available_at=105),))
+        real_sleep = asyncio.sleep
+
+        async def wait(delay):
+            # Patching the shared asyncio module also sees Tornado's cooperative yields.
+            if delay == 0:
+                return await real_sleep(0)
+            assert delay == 5
+            assert not self.upstream_calls
+
+        with patch("streaming.time.time", return_value=100), \
+                patch("streaming.asyncio.sleep", new=AsyncMock(side_effect=wait)) as sleeper, \
+                patch.object(self.relay, "client", self.fake()):
+            response = await self.http_client.fetch(self.get_url(self.path))
+        assert response.code == 200
+        assert [call.args for call in sleeper.await_args_list if call.args != (0,)] == [(5,)]
+        assert len(self.upstream_calls) == 1
+        assert any(event["stage"] == "waiting for source availability" for event in self.ticket.events)
+
+    def test_excessive_source_wait_fails_without_upstream_request(self):
+        self.ticket.video = replace(VIDEO, tracks=(replace(VIDEO.tracks[0], available_at=1000),))
+        with patch("streaming.time.time", return_value=100), patch.object(self.relay, "client", self.fake()):
+            response = self.fetch(self.path)
+        assert response.code == 502 and not self.upstream_calls
+        assert "two minutes" in self.ticket.error
+        assert self.relay.active == 0
 
     def test_ranges_forward_and_backward(self):
         for first, last in [(700, 799), (0, 1), (100, 199)]:

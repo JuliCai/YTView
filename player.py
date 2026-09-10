@@ -3,7 +3,8 @@
 from pathlib import Path
 import secrets
 
-from streaming import BaseHandler, REGISTRY, Resource, Ticket
+from streaming import BUILD, BaseHandler, REGISTRY, Resource, Ticket
+from sources import MAX_SOURCE_WAIT
 
 
 def render_player(ticket: Ticket, prefix: str) -> str:
@@ -20,6 +21,7 @@ def render_player(ticket: Ticket, prefix: str) -> str:
         src = ticket.add(Resource(track.url, track.headers), prefix)
     template = Path(__file__).with_name("player.html").read_text()
     for name, value in {"SOURCE": src, "POSTER": poster, "MODE": ticket.video.mode,
+                        "BUILD": BUILD, "MAX_SOURCE_WAIT": str(MAX_SOURCE_WAIT),
                         "NONCE": nonce, "STATUS": f"{prefix}/status/{token}",
                         "LIBRARY": f"{prefix}/hls.js"}.items():
         template = template.replace("{{" + name + "}}", value)

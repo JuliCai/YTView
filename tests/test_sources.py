@@ -1,6 +1,7 @@
 import pytest
+from unittest.mock import MagicMock, patch
 
-from sources import SourceError, extract_video_id, select_video, validate_upstream
+from sources import SourceError, extract_video_id, resolve_video, select_video, validate_upstream
 
 ID = "jNQXAC9IVRw"
 
@@ -54,3 +55,49 @@ def test_progressive_fallback_is_already_muxed():
 def test_live_rejected():
     with pytest.raises(SourceError, match="live"):
         select_video({"is_live": True}, ID, 720)
+
+
+def test_preplayback_availability_is_preserved_for_audio_and_video():
+    info = {"formats": [format_info(720, available_at=2_000_000_010),
+                        format_info(0, url="https://r.googlevideo.com/audio", vcodec="none",
+                                    acodec="mp4a.40.2", available_at=2_000_000_020)]}
+    video = select_video(info, ID, 720)
+    assert video.tracks[0].available_at == 2_000_000_010
+    assert video.audio is not None
+    assert video.audio.available_at == 2_000_000_020
+    assert video.available_at == 2_000_000_020
+
+
+def test_extractor_and_relay_use_same_direct_ipv4_policy():
+    ydl = MagicMock()
+    ydl.__enter__.return_value.extract_info.return_value = {
+        "formats": [format_info(acodec="mp4a.40.2")]}
+    with patch("sources.YoutubeDL", return_value=ydl) as factory:
+        resolve_video(ID)
+    options = factory.call_args.args[0]
+    assert options["proxy"] == ""
+    assert options["source_address"] == "0.0.0.0"
+
+
+def test_safari_profile_is_explicit_and_server_side():
+    ydl = MagicMock()
+    ydl.__enter__.return_value.extract_info.return_value = {
+        "formats": [format_info(acodec="mp4a.40.2")]}
+    with patch("sources.YoutubeDL", return_value=ydl) as factory:
+        video = resolve_video(ID, client_profile="web_safari")
+    assert factory.call_args.args[0]["extractor_args"] == {"youtube": {"player_client": ["web_safari"]}}
+    assert video.client_profile == "web_safari"
+    ydl.__enter__.return_value.extract_info.assert_called_once_with(
+        f"https://www.youtube.com/watch?v={ID}", download=False)
+
+
+def test_unknown_profile_does_not_start_extraction():
+    with patch("sources.YoutubeDL") as factory, pytest.raises(SourceError, match="profile"):
+        resolve_video(ID, client_profile="untrusted")
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize("timing", [float("nan"), float("inf"), "not-a-time"])
+def test_invalid_source_timing_rejected(timing):
+    with pytest.raises(SourceError, match="timing"):
+        select_video({"formats": [format_info(acodec="mp4a.40.2", available_at=timing)]}, ID, 720)

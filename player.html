@@ -32,7 +32,8 @@
     const entries = [];
     let hls, failed = false, stalls = 0, firstFrame = null, hasPlayed = false, ready = false;
     let playRequested = null, lastProgress = started, lastPosition = 0;
-    let thumbnailTimer, libraryTimer;
+    let startupDeadline = started + 30000, sourceWaitUntil = 0;
+    let thumbnailTimer, libraryTimer, sourceWaitTimer;
     function log(text) {
       entries.push(`${((performance.now() - started) / 1000).toFixed(1)}s ${text}`);
       if (entries.length > 40) entries.shift();
@@ -50,7 +51,7 @@
         if (!response.headers.get('content-type')?.includes('application/json'))
           throw new Error('Instance status returned HTML/non-JSON instead of the proxy. Cloud routing is still incorrect.');
         const data = await response.json();
-        if (data.build !== 'instance-streaming-v2') throw new Error('The proxy is running a different build. Reboot the cloud app.');
+        if (data.build !== '{{BUILD}}') throw new Error('The proxy is running a different build. Reboot the cloud app.');
         return data;
       } catch (error) {
         if (error.name === 'AbortError') throw new Error('Instance status timed out after 10 seconds.');
@@ -64,6 +65,7 @@
       if (hls) hls.stopLoad();
       video.pause();
       clearTimeout(libraryTimer);
+      clearTimeout(sourceWaitTimer);
       message.className = 'error';
       message.textContent = text;
       log(text);
@@ -95,7 +97,12 @@
     const timer = setInterval(() => {
       if (failed) return;
       const now = performance.now();
-      if (!ready && now - started > 30000) return fail('Playback startup timed out after 30 seconds. See the last completed stage below.');
+      if (!ready && now > startupDeadline) return fail('Playback startup timed out after 30 seconds. See the last completed stage below.');
+      if (now < sourceWaitUntil) {
+        say(`YouTube requires a pre-playback wait: ${Math.ceil((sourceWaitUntil - now) / 1000)}s remaining…`);
+        details.textContent = 'Waiting for the source availability deadline; not downloading or converting the video.';
+        return;
+      }
       if (Math.abs(video.currentTime - lastPosition) > 0.05) { lastPosition = video.currentTime; lastProgress = now; }
       if (ready && (video.seeking || (!video.paused && !video.ended)) && now - lastProgress > 30000)
         return fail('Playback or seeking stalled for 30 seconds. See the instance HTTP codes below.');
@@ -108,15 +115,27 @@
     }, 1000);
     async function start() {
       say('Checking the instance streaming route…');
-      await instanceStatus();
+      const status = await instanceStatus();
       if (failed) return;
-      log('Instance route OK (JSON, build v2).');
+      log('Instance route OK (JSON, {{BUILD}}).');
       const poster = new Image();
       thumbnailTimer = setTimeout(() => log('Thumbnail request timed out after 12 seconds; video will still be attempted.'), 12000);
       poster.onload = () => { clearTimeout(thumbnailTimer); log('Thumbnail loaded through the instance.'); };
       poster.onerror = () => { clearTimeout(thumbnailTimer); log('Thumbnail failed. Check the instance diagnostics for its HTTP code.'); };
       poster.src = '{{POSTER}}';
       video.poster = '{{POSTER}}';
+      const sourceWait = Number(status.source_wait_seconds || 0);
+      if (!Number.isFinite(sourceWait) || sourceWait < 0 || sourceWait > {{MAX_SOURCE_WAIT}})
+        return fail('YouTube requires a wait longer than two minutes or returned invalid timing. Try loading this video later.');
+      if (sourceWait > 0) {
+        log(`Source requires ${sourceWait.toFixed(1)}s before media is available. Honoring yt-dlp's deadline.`);
+        sourceWaitUntil = performance.now() + sourceWait * 1000 + 250;
+        startupDeadline = sourceWaitUntil + 30000;
+        say(`YouTube requires a pre-playback wait: ${Math.ceil(sourceWait)}s remaining…`);
+        await new Promise(resolve => { sourceWaitTimer = setTimeout(resolve, sourceWait * 1000 + 250); });
+        if (failed) return;
+        log('Source availability wait completed.');
+      }
       if ('{{MODE}}' === 'mp4' || video.canPlayType('application/vnd.apple.mpegurl')) {
         log('Using native {{MODE}} playback. Requesting media metadata.');
         say('Loading media metadata through the instance…');
@@ -151,7 +170,7 @@
       document.head.appendChild(script);
     }
     start().catch(error => fail(error.message));
-    window.addEventListener('pagehide', () => { clearInterval(timer); clearTimeout(thumbnailTimer); clearTimeout(libraryTimer); if (hls) hls.destroy(); video.removeAttribute('src'); video.load(); });
+    window.addEventListener('pagehide', () => { clearInterval(timer); clearTimeout(thumbnailTimer); clearTimeout(libraryTimer); clearTimeout(sourceWaitTimer); if (hls) hls.destroy(); video.removeAttribute('src'); video.load(); });
   </script>
 </body>
 </html>

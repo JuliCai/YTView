@@ -14,10 +14,10 @@ import httpx
 from tornado.iostream import StreamClosedError
 from tornado.web import HTTPError, RequestHandler
 
-from sources import SourceError, Video, validate_upstream
+from sources import MAX_SOURCE_WAIT, SourceError, Video, validate_upstream
 
 CHUNK_SIZE = 64 * 1024
-BUILD = "instance-streaming-v2"
+BUILD = "instance-streaming-v3"
 MAX_MANIFEST = 2 * 1024 * 1024
 MAX_RANGE = 2 * 1024 * 1024
 TICKET_TTL = 6 * 60 * 60
@@ -55,6 +55,9 @@ class Ticket:
         with self.lock:
             return {"build": BUILD, "mode": self.video.mode, "requests": self.requests,
                     "bytes": self.bytes_sent, "error": self.error,
+                    "client_profile": self.video.client_profile,
+                    "source_wait_seconds": round(max(0, self.video.available_at - time.time()), 1),
+                    "network_policy": "direct IPv4 for extraction and relay",
                     "registered_resources": len(self.resources), "events": list(self.events)}
 
     def add(self, resource: Resource, prefix: str) -> str:
@@ -80,6 +83,8 @@ class Registry:
             if len(self.tickets) >= 32:
                 raise SourceError("The instance has too many active videos. Please try again later.")
             ticket = Ticket(video)
+            ticket.record("source selected", client_profile=video.client_profile,
+                          source_wait_seconds=round(max(0, video.available_at - time.time()), 1))
             self.tickets[ticket.token] = ticket
             return ticket
 
@@ -184,7 +189,10 @@ class Relay:
     def __init__(self):
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(20, connect=10, pool=5), trust_env=False,
-            limits=httpx.Limits(max_connections=24, max_keepalive_connections=12),
+            transport=httpx.AsyncHTTPTransport(
+                local_address="0.0.0.0", trust_env=False,
+                limits=httpx.Limits(max_connections=24, max_keepalive_connections=12),
+            ),
         )
         self.active = 0
         self.hls_js: bytes | None = None
@@ -270,11 +278,22 @@ class ResourceHandler(BaseHandler):
             self.finish("The instance is busy. Retry shortly.")
             return
         headers = upstream_headers(source, self.request.headers.get("Range"))
-        ticket.record("upstream request", kind=source.kind, method=self.request.method)
         self.task = asyncio.current_task()
         self.relay.active += 1
         response = None
         try:
+            # yt-dlp's downloader honors available_at before touching media.
+            # Enforce it here too; never rely solely on the browser countdown.
+            if source.kind != "thumbnail":
+                delay = max(0, ticket.video.available_at - time.time())
+                if delay > MAX_SOURCE_WAIT:
+                    raise SourceError("YouTube requires a wait longer than two minutes. Try loading this video later.")
+                if delay:
+                    ticket.record("waiting for source availability", wait_seconds=round(delay, 1))
+                    await asyncio.sleep(delay)
+            ticket.record("upstream request", kind=source.kind, method=self.request.method,
+                          range_requested="Range" in headers,
+                          url_reencoded=str(httpx.URL(source.url)) != source.url)
             response = await self.relay.open(source, headers, self.request.method)
             ticket.record("upstream response", kind=source.kind, http=response.status_code)
             with ticket.lock:
@@ -286,6 +305,13 @@ class ResourceHandler(BaseHandler):
                 self.finish()
                 return
             if response.status_code not in {200, 206}:
+                if response.status_code == 403 and source.kind == "media":
+                    raise SourceError(
+                        "YouTube denied the media segment (HTTP 403), even though its playlist was accessible. "
+                        "Try the other YouTube client profile and click Load video. "
+                        "If both profiles fail, this may require a server-side PO token or a different hosting IP; "
+                        "refreshing alone may not help. No direct-browser fallback was attempted."
+                    )
                 raise SourceError(f"The video source returned HTTP {response.status_code}. Refresh the stream; if it repeats, report this code.")
             if headers.get("Range") and response.status_code != 206:
                 raise SourceError("The source ignored a seek request. No full-download fallback was attempted.")

@@ -13,7 +13,7 @@ st.caption("YouTube → this instance → you. No conversion queue. No direct Yo
 # Python still has an older module cached. Reloading individual modules is unsafe:
 # Tornado's existing handlers can retain the old registry and connection pool.
 try:
-    from sources import SourceError, extract_video_id, resolve_video
+    from sources import CLIENT_PROFILES, SourceError, extract_video_id, resolve_video
     from player import render_player
     from streaming import BUILD, REGISTRY
     from streamlit_proxy import RestartRequired, ensure_proxy
@@ -44,6 +44,9 @@ with st.form("open_video"):
     url = st.text_input("YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
     quality = st.selectbox("Maximum quality", [360, 720, 1080], index=1,
                            format_func=lambda value: f"{value}p" + (" · balanced" if value == 720 else ""))
+    profile = st.selectbox("YouTube client profile", list(CLIENT_PROFILES),
+                           format_func=CLIENT_PROFILES.__getitem__,
+                           help="If a media segment returns 403, try the other profile and click Load video. Both run on the instance; neither contacts YouTube from your browser.")
     submitted = st.form_submit_button("Load video", type="primary")
 
 current = st.session_state.get("playback")
@@ -53,13 +56,14 @@ refresh = st.button("Refresh stream", disabled=current is None,
 if submitted or refresh:
     video_id = extract_video_id(url) if submitted else current["video_id"]
     height = quality if submitted else current["height"]
+    selected_profile = profile if submitted else current.get("client_profile", "auto")
     if not video_id:
         st.error("Enter a valid YouTube watch, Shorts, live, embed or youtu.be link, or an 11-character video ID.")
     else:
         started = time.monotonic()
         with st.spinner("Reading stream metadata on the instance — not downloading the video…"):
             try:
-                video = resolve_video(video_id, height)
+                video = resolve_video(video_id, height, client_profile=selected_profile)
                 if current:
                     REGISTRY.discard(current["token"])
                     st.session_state.pop("playback", None)
@@ -68,6 +72,7 @@ if submitted or refresh:
                 st.session_state["playback"] = {
                     "token": ticket.token, "video_id": video_id, "height": height,
                     "title": video.title, "mode": video.mode,
+                    "client_profile": selected_profile,
                     "actual_height": max(t.height for t in video.tracks),
                     "resolved_seconds": round(time.monotonic() - started, 1),
                 }
