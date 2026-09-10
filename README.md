@@ -44,7 +44,7 @@ macOS and on Linux in Community Cloud. No extra exposed port is needed.
 
 Community Cloud should track **JuliCai/YTView → main → app.py**. Pushing to that
 branch triggers its update; dependency changes can require a rebuild/reboot. The
-footer **Build: instance-streaming-v5** identifies this deployment. Existing
+footer **Build: instance-streaming-v6** identifies this deployment. Existing
 `RAPIDAPI_KEY` secrets can be removed; the application no longer reads them.
 
 **After code updates, use Manage app → Reboot app in Community Cloud.** Python
@@ -99,7 +99,39 @@ Diagnostics include the selected profile, initial/remaining source wait, request
 range presence, and whether HTTPX re-encoded the URL (a boolean, never its contents).
 An accessible playlist does not prove that its signed segments will be accepted.
 
-### Bounded cloud-side segment comparison (v5)
+### Instance-only PO-token option (v6)
+
+If Automatic and Safari both return media 403s, select **Mobile web + instance
+PO token** and click **Load video**. This implements yt-dlp's
+[recommended client/token combination](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide),
+not another change of HTTP library. It does **not** guarantee acceptance by YouTube.
+
+- Uses the pinned **BgUtils provider 2.0.0**, executed on demand with the instance's
+	Deno runtime. No Docker, extra public port, external token service, account
+	cookies, or end-user browser requests are involved.
+- First use downloads a checksum-verified source archive pinned to a commit and
+	installs its locked dependencies in the ignored application cache. Dependency
+	installation has a three-minute timeout; subsequent loads reuse it. Cloud
+	installs the native canvas runtime libraries from packages.txt.
+- Token-enabled metadata extraction is isolated with a 90-second timeout and
+	captured stdout/stderr. Timeout terminates its process group, including Deno.
+	Raw provider errors and signed source URLs are not rendered or logged by the app.
+- Requires token-bearing media URLs: failed token generation does not silently
+	fall back to unauthenticated formats. Diagnostics expose only
+	`po_token_attached: true`, never the token itself. This confirms attachment,
+	not that YouTube accepted the token.
+- The existing streaming/seek implementation is unchanged. Only compatible HLS
+	or **already-muxed** MP4 is selected. Mobile-web sources may therefore be limited
+	to 360p; separate audio/video files are not downloaded and converted to MP4.
+- The original Automatic/Safari profiles remain available and explicitly disable
+	token fetching. Nothing is installed or generated merely by opening the page.
+
+The provider source includes its GPL-3.0 license; the application does not vendor
+or modify that source. See [BgUtils provider documentation](https://github.com/Brainicism/bgutil-ytdlp-pot-provider).
+This deployment changes Python and Linux dependencies: **reboot the Cloud app**
+and wait for its dependency update before trying the new profile.
+
+### Bounded cloud-side segment comparison
 
 After attempting playback, expand **Compare media request — yt-dlp vs relay** and
 click **Run bounded segment comparison**. It runs only on demand, on the instance,

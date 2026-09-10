@@ -4,3 +4,4 @@ tornado>=6.5.2,<7
 httpx==0.28.1
 yt-dlp[default]==2026.8.19
 deno==2.9.6
+bgutil-ytdlp-pot-provider==2.0.0

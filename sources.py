@@ -1,16 +1,24 @@
 """Resolve metadata only. Upstream URLs must never be rendered in Streamlit."""
 
 from dataclasses import dataclass, field, replace
+import json
 import math
+from pathlib import Path
 import re
+import subprocess
+import sys
 from urllib.parse import parse_qs, urlsplit
 
 from deno import find_deno_bin
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-CLIENT_PROFILES = {"auto": "Automatic (yt-dlp default)", "web_safari": "Safari HLS (server-side)"}
+from token_provider import ProviderSetupError, prepare_provider, run_private
+
+CLIENT_PROFILES = {"auto": "Automatic (yt-dlp default)", "web_safari": "Safari HLS (server-side)",
+                   "mweb_pot": "Mobile web + instance PO token"}
 MAX_SOURCE_WAIT = 120
+TOKEN_EXTRACT_TIMEOUT = 90
 
 
 class SourceError(Exception):
@@ -79,6 +87,7 @@ class Video:
     tracks: tuple[Track, ...]
     audio: Track | None = None
     client_profile: str = "auto"
+    po_token_attached: bool = False
 
     @property
     def available_at(self) -> float:
@@ -164,12 +173,42 @@ def resolve_video(video_id: str, max_height: int = 720, *, client_profile: str =
         # proxy or a different address family than the media requests.
         "proxy": "", "source_address": "0.0.0.0",
         "js_runtimes": {"deno": {"path": str(find_deno_bin())}},
+        # Installing a plugin must not turn the existing profiles into hidden
+        # token-generation attempts. Only the explicit token profile opts in.
+        "extractor_args": {"youtube": {"fetch_pot": ["never"]}},
     }
-    if client_profile != "auto":
-        options["extractor_args"] = {"youtube": {"player_client": [client_profile]}}
+    if client_profile == "mweb_pot":
+        try:
+            server = prepare_provider(options["js_runtimes"]["deno"]["path"])
+        except ProviderSetupError as exc:
+            raise SourceError(str(exc)) from None
+        options["extractor_args"] = {
+            "youtube": {"player_client": ["mweb"], "fetch_pot": ["always"]},
+            "youtubepot-bgutilscript": {"server_home": [str(server)]},
+        }
+    elif client_profile != "auto":
+        options["extractor_args"]["youtube"]["player_client"] = [client_profile]
     try:
-        with YoutubeDL(options) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+        if client_profile == "mweb_pot":
+            # Some provider subprocesses write raw errors to stderr themselves.
+            # Isolate extraction so neither those logs nor signed URLs reach UI/logs.
+            worker_options = {k: v for k, v in options.items() if k != "logger"}
+            try:
+                result = run_private(
+                    [sys.executable, str(Path(__file__).resolve()), "--token-worker"],
+                    input=json.dumps({"video_id": video_id, "options": worker_options}),
+                    timeout=TOKEN_EXTRACT_TIMEOUT,
+                )
+                if result.returncode:
+                    raise SourceError("Token-enabled extraction failed on the instance. No raw provider logs were exposed.")
+                info = json.loads(result.stdout)
+            except subprocess.TimeoutExpired:
+                raise SourceError("Token-enabled extraction exceeded 90 seconds. Its worker and token process were stopped.") from None
+            except (ValueError, OSError):
+                raise SourceError("Token-enabled extraction returned an invalid result. No raw provider logs were exposed.") from None
+        else:
+            with YoutubeDL(options) as ydl:
+                info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
     except DownloadError as exc:
         message = str(exc).lower()
         if any(word in message for word in ("bot", "sign in", "403", "429")):
@@ -180,4 +219,35 @@ def resolve_video(video_id: str, max_height: int = 720, *, client_profile: str =
         raise SourceError("The instance could not read this video from YouTube. It may be unavailable or restricted.") from None
     if not isinstance(info, dict):
         raise SourceError("YouTube returned no video metadata.")
-    return replace(select_video(info, video_id, max_height), client_profile=client_profile)
+    if client_profile == "mweb_pot":
+        # Do not silently return to tokenless playback when a provider fails.
+        # yt-dlp appends GVS tokens to HTTPS queries or HLS manifest paths.
+        def has_token(fmt):
+            parsed = urlsplit(fmt.get("url") or "")
+            return bool(parse_qs(parsed.query).get("pot") or re.search(r"/pot/[^/]+", parsed.path))
+
+        info = {**info, "formats": [fmt for fmt in info.get("formats", []) if has_token(fmt)]}
+        if not info["formats"]:
+            raise SourceError("The instance did not obtain a token-bearing media URL. Token generation or mobile-web extraction failed; no tokenless fallback was attempted.")
+    video = select_video(info, video_id, max_height)
+    return replace(video, client_profile=client_profile, po_token_attached=client_profile == "mweb_pot")
+
+
+def _token_worker() -> int:
+    try:
+        payload = json.load(sys.stdin)
+        video_id = payload["video_id"]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+            return 1
+        options = payload["options"]
+        options["logger"] = QuietLogger()
+        with YoutubeDL(options) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+            print(json.dumps(ydl.sanitize_info(info)))
+        return 0
+    except Exception:
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_token_worker() if sys.argv[1:] == ["--token-worker"] else 2)

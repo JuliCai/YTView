@@ -1,0 +1,7 @@
+# Runtime libraries for the provider's prebuilt canvas module on Cloud.
+libcairo2
+libpango-1.0-0
+libpangocairo-1.0-0
+libjpeg62-turbo
+libgif7
+librsvg2-2

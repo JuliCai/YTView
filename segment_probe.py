@@ -279,6 +279,7 @@ def run_segment_probe(ticket: Ticket) -> dict:
         raw = json.loads(completed.stdout)
         native, relay = _clean_result(raw["native_ytdlp"]), _clean_result(raw["relay_httpx"])
         return {"state": "complete", "build": BUILD, "client_profile": ticket.video.client_profile,
+            "po_token_attached": ticket.video.po_token_attached,
                 "sample_limit_bytes_per_client": SAMPLE_BYTES, "sample_range": headers["Range"],
                 "original_http_status": target.http_status,
                 "original_request_had_range": any(k.lower() == "range" for k in target.headers),

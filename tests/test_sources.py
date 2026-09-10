@@ -85,7 +85,7 @@ def test_safari_profile_is_explicit_and_server_side():
         "formats": [format_info(acodec="mp4a.40.2")]}
     with patch("sources.YoutubeDL", return_value=ydl) as factory:
         video = resolve_video(ID, client_profile="web_safari")
-    assert factory.call_args.args[0]["extractor_args"] == {"youtube": {"player_client": ["web_safari"]}}
+    assert factory.call_args.args[0]["extractor_args"] == {"youtube": {"player_client": ["web_safari"], "fetch_pot": ["never"]}}
     assert video.client_profile == "web_safari"
     ydl.__enter__.return_value.extract_info.assert_called_once_with(
         f"https://www.youtube.com/watch?v={ID}", download=False)

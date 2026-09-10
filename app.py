@@ -47,7 +47,9 @@ with st.form("open_video"):
                            format_func=lambda value: f"{value}p" + (" · balanced" if value == 720 else ""))
     profile = st.selectbox("YouTube client profile", list(CLIENT_PROFILES),
                            format_func=CLIENT_PROFILES.__getitem__,
-                           help="If a media segment returns 403, try the other profile and click Load video. Both run on the instance; neither contacts YouTube from your browser.")
+                           help="If both ordinary profiles return 403, choose Mobile web + instance PO token. Token generation and video requests stay on the instance; no account cookies are needed.")
+    st.caption("The PO-token option prepares its dependencies on first use (up to three minutes). "
+               "Mobile-web playback may be limited to an already-muxed 360p MP4; no conversion is used.")
     submitted = st.form_submit_button("Load video", type="primary")
 
 current = st.session_state.get("playback")
@@ -62,7 +64,8 @@ if submitted or refresh:
         st.error("Enter a valid YouTube watch, Shorts, live, embed or youtu.be link, or an 11-character video ID.")
     else:
         started = time.monotonic()
-        with st.spinner("Reading stream metadata on the instance — not downloading the video…"):
+        with st.spinner("Preparing instance authorization and reading metadata — not downloading the video…"
+                if selected_profile == "mweb_pot" else "Reading stream metadata on the instance — not downloading the video…"):
             try:
                 video = resolve_video(video_id, height, client_profile=selected_profile)
                 if current:
@@ -136,4 +139,4 @@ if current:
             st.write("Try 360p if the instance cannot sustain 720p. Forward/backward seeks fetch only the needed segments or byte ranges. Refresh stream renews expired source URLs.")
             st.write("For a bug report: include whether the thumbnail appears, time until playback, audio, forward/backward seeking, rebuffer count, and any error shown inside the player.")
 
-st.caption(f"Build: {BUILD} · bounded native segment comparison · startup guard v2.1 · no RapidAPI")
+st.caption(f"Build: {BUILD} · instance-only PO-token option · startup guard v2.1 · no RapidAPI")

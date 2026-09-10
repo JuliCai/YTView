@@ -17,7 +17,7 @@ from tornado.web import HTTPError, RequestHandler
 from sources import MAX_SOURCE_WAIT, SourceError, Video, validate_upstream
 
 CHUNK_SIZE = 64 * 1024
-BUILD = "instance-streaming-v5"
+BUILD = "instance-streaming-v6"
 MAX_MANIFEST = 2 * 1024 * 1024
 MAX_RANGE = 2 * 1024 * 1024
 TICKET_TTL = 6 * 60 * 60
@@ -64,6 +64,7 @@ class Ticket:
             return {"build": BUILD, "mode": self.video.mode, "requests": self.requests,
                     "bytes": self.bytes_sent, "error": self.error,
                     "client_profile": self.video.client_profile,
+                    "po_token_attached": self.video.po_token_attached,
                     "source_wait_seconds": round(max(0, self.video.available_at - time.time()), 1),
                     "network_policy": "direct IPv4 for extraction and relay",
                     "segment_comparison_available": self.probe_target is not None,
@@ -327,9 +328,9 @@ class ResourceHandler(BaseHandler):
                 if response.status_code == 403 and source.kind == "media":
                     raise SourceError(
                         "YouTube denied the media segment (HTTP 403), even though its playlist was accessible. "
-                        "Try the other YouTube client profile and click Load video. "
-                        "If both profiles fail, this may require a server-side PO token or a different hosting IP; "
-                        "refreshing alone may not help. No direct-browser fallback was attempted."
+                        "If Automatic and Safari both fail, select Mobile web + instance PO token and click Load video. "
+                        "A token does not guarantee access; persistent denial may require a different hosting IP. "
+                        "No direct-browser fallback was attempted."
                     )
                 raise SourceError(f"The video source returned HTTP {response.status_code}. Refresh the stream; if it repeats, report this code.")
             if headers.get("Range") and response.status_code != 206:
