@@ -44,17 +44,26 @@ macOS and on Linux in Community Cloud. No extra exposed port is needed.
 
 Community Cloud should track **JuliCai/YTView → main → app.py**. Pushing to that
 branch triggers its update; dependency changes can require a rebuild/reboot. The
-footer **Build: instance-streaming-v6** identifies this deployment. Existing
+footer **Build: instance-streaming-v6.1** identifies this deployment. Existing
 `RAPIDAPI_KEY` secrets can be removed; the application no longer reads them.
 
-**After code updates, use Manage app → Reboot app in Community Cloud.** Python
-may retain older imported modules, while Tornado's installed handlers retain their
-registry and connection pool even when Streamlit reloads scripts. A browser refresh
-or clearing Streamlit's data cache is not a process restart. Startup guard v2.1
-shows a recovery notice for import mismatches and refuses to reuse stale routes.
+**After code updates, use Manage app → Reboot app in Community Cloud.** In-process
+file watching is disabled: Streamlit's hot reload removes imported modules, while
+Tornado's installed handlers retain their registry and connection pool. Updates
+must restart the process rather than mix module generations. A browser refresh
+or clearing Streamlit's data cache is not a process restart. Startup guard v2.2
+shows a recovery notice for import mismatches (including an interrupted `streaming`
+import raising `KeyError`) and refuses to reuse stale routes.
 An error such as `cannot import name 'render_player'` despite the function being
 present in the pushed code calls for a full reboot after the update finishes. If
 it persists, check that Cloud deployed the current commit and share its startup logs.
+
+Keep **packages.txt limited to bare Debian package names, one per line**. Cloud's
+installer passes it through `xargs`: comments are treated as package names, and
+quotes can break parsing. Descriptions belong here, not in that file. Its six
+packages supply native runtime libraries for the token provider's canvas module.
+If installation fails, let the corrected dependency build finish before rebooting;
+an app error from a partially applied deployment does not confirm playback failure.
 
 **Keep Streamlit pinned to 1.54.0 and the Tornado backend enabled.** This version
 does not expose a public route-registration hook. The small adapter in

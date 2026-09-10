@@ -3,5 +3,7 @@ gatherUsageStats = false
 
 [server]
 useStarlette = false
+# Installed Tornado routes retain module objects; apply code updates by reboot.
+fileWatcherType = "none"
 enableCORS = true
 enableXsrfProtection = true

@@ -1,3 +1,4 @@
+import builtins
 from pathlib import Path
 import sys
 from types import ModuleType
@@ -70,6 +71,27 @@ def test_stale_routes_show_reboot_instructions():
         assert not app.exception
         assert "Reboot app" in app.error[0].value
         assert not app.text_input
+
+
+@pytest.mark.parametrize("missing_key", ["streaming", "unrelated_configuration_key"])
+def test_streaming_import_keyerror_has_narrow_recovery(missing_key):
+    actual_import = builtins.__import__
+
+    def interrupted_import(name, *args, **kwargs):
+        if name == "streaming":
+            raise KeyError(missing_key)
+        return actual_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=interrupted_import):
+        app = AppTest.from_file("app.py").run()
+    if missing_key != "streaming":
+        assert app.exception
+        assert not app.error
+        return
+    assert not app.exception
+    assert "KeyError" in app.error[0].value
+    assert "Reboot app" in app.error[0].value
+    assert not app.text_input and not app.get("iframe")
 
 
 @pytest.mark.parametrize("profile", ["web_safari", "mweb_pot"])

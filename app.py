@@ -18,7 +18,11 @@ try:
     from streaming import BUILD, REGISTRY
     from streamlit_proxy import RestartRequired, ensure_proxy
     from segment_probe import SAMPLE_BYTES, WORKER_TIMEOUT, run_segment_probe
-except ImportError as exc:
+except (ImportError, KeyError) as exc:
+    # An interrupted import can raise KeyError if a watcher removes the module.
+    # Do not disguise unrelated dictionary bugs as a deployment mismatch.
+    if isinstance(exc, KeyError) and exc.args != ("streaming",):
+        raise
     logging.getLogger(__name__).error("App module initialization failed: %s", type(exc).__name__)
     st.error(
         f"App modules could not initialize ({type(exc).__name__}). "
@@ -27,14 +31,14 @@ except ImportError as exc:
         "Refreshing this page or clearing Streamlit's data cache does not restart Python. "
         "If this persists after rebooting, share the deployment logs."
     )
-    st.caption("Startup guard: v2.1 · playback stopped safely")
+    st.caption("Startup guard: v2.2 · playback stopped safely")
     st.stop()
 
 try:
     prefix = ensure_proxy()
 except RestartRequired as exc:
     st.error(str(exc))
-    st.caption("Startup guard: v2.1 · playback stopped safely")
+    st.caption("Startup guard: v2.2 · playback stopped safely")
     st.stop()
 except Exception as exc:
     logging.getLogger(__name__).error("Streaming route setup failed: %s", type(exc).__name__)
@@ -139,4 +143,4 @@ if current:
             st.write("Try 360p if the instance cannot sustain 720p. Forward/backward seeks fetch only the needed segments or byte ranges. Refresh stream renews expired source URLs.")
             st.write("For a bug report: include whether the thumbnail appears, time until playback, audio, forward/backward seeking, rebuffer count, and any error shown inside the player.")
 
-st.caption(f"Build: {BUILD} · instance-only PO-token option · startup guard v2.1 · no RapidAPI")
+st.caption(f"Build: {BUILD} · instance-only PO-token option · startup guard v2.2 · no RapidAPI")
